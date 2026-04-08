@@ -79,6 +79,8 @@ def run_audit(start_url):
 
 
 if __name__ == "__main__":
+    print("Running automated SEO audit pipeline...")
+
     url = "https://www.directmeds.com.au/"
     df = run_audit(url)
 
