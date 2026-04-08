@@ -14,7 +14,11 @@ The system is built as a modular pipeline that processes websites at scale with 
 
 ## 🎯 Problem Solved
 
-Manual SEO audits are time-consuming, inconsistent, and difficult to scale.
+Manual SEO audits are:
+
+* Time-consuming
+* Inconsistent
+* Difficult to scale
 
 This system automates:
 
@@ -26,7 +30,7 @@ This system automates:
 * SEO scoring
 * AI-based recommendations
 
-👉 Result: Significant reduction in manual SEO effort
+👉 Result: Significant reduction in manual SEO effort and faster decision-making
 
 ---
 
@@ -34,7 +38,7 @@ This system automates:
 
 Sitemap → Crawl → Parse → Enrich → Analyze → Score → Output
 
-Each stage is independently modular and can be extended or integrated into larger automation workflows.
+Each stage is modular and can be independently extended or integrated into automation workflows.
 
 ---
 
@@ -42,8 +46,8 @@ Each stage is independently modular and can be extended or integrated into large
 
 ### 1. Automated Crawling
 
-* Fetches URLs from sitemap
-* Handles response tracking and timing
+* Extracts URLs from sitemap
+* Tracks status codes and response time
 
 ### 2. SEO Data Extraction
 
@@ -89,31 +93,56 @@ The system generates structured outputs:
 * SEO scores for prioritization
 * Technical and content insights
 
-Sample output available in `/output/` folder.
+📁 Sample output available in `/output/` folder.
+
+---
+
+## 📸 Sample Output Preview
+
+![Audit Output](images/audit_output.png)
 
 ---
 
 ## 🧠 AI Integration
 
-The system uses AI to convert raw SEO data into actionable insights.
+The system uses AI to convert raw SEO signals into actionable insights:
 
-Example:
-
-* Identify missing topics
-* Suggest improvements
-* Highlight content gaps
+* Missing topics detection
+* Content improvement suggestions
+* SEO issue identification
 
 ---
 
-## 🔌 Automation Perspective
+## 🔄 Automation Use Case
 
-This system is designed as a foundation for SEO automation workflows.
+This system is designed as a foundation for SEO automation workflows:
 
-It can be integrated with:
+* Trigger audits automatically for new pages
+* Generate structured reports for teams
+* Feed insights into content optimization pipelines
+* Enable scalable SEO analysis across multiple websites
 
-* CMS platforms (WordPress / Shopify)
-* Workflow tools (n8n / Zapier)
-* SEO tools (Ahrefs / SEMrush APIs)
+👉 Designed to reduce repetitive manual SEO work significantly
+
+---
+
+## 🔌 Extensibility
+
+The system can be easily extended into:
+
+* API-based services
+* Workflow automation tools (n8n, Zapier)
+* CMS integrations (WordPress, Shopify)
+* SEO tool integrations (Ahrefs / SEMrush APIs)
+
+---
+
+## ⚡ Automation Impact
+
+* Eliminates repetitive manual SEO checks
+* Standardizes audit workflows
+* Enables scalable SEO operations
+* Reduces manual effort significantly
 
 ---
 
@@ -134,26 +163,12 @@ python main.py
 
 ---
 
-## 🎯 Impact
-
-* Reduces manual SEO audit work significantly
-* Enables scalable SEO analysis
-* Provides structured, repeatable insights
-* Forms the base for larger SEO automation systems
-
----
-
-## 🚀 Future Scope
-
-* API layer for automation workflows
-* CMS integration for automated publishing
-* Dashboard for SEO performance tracking
-* Integration with SEO tools APIs
-
----
-
-## 📌 Why This Project
+## 🎯 Why This Project
 
 Built to simulate real-world SEO automation systems used in scaling organic growth.
 
-Focus: automation, scalability, and AI-driven insights.
+Focus:
+
+* Automation
+* Scalability
+* AI-driven insights
