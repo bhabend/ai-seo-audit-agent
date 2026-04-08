@@ -117,10 +117,12 @@ The system uses AI to convert raw SEO signals into actionable insights:
 
 This system is designed as a foundation for SEO automation workflows:
 
-* Trigger audits automatically for new pages
-* Generate structured reports for teams
-* Feed insights into content optimization pipelines
-* Enable scalable SEO analysis across multiple websites
+- Trigger audits automatically for new pages  
+- Generate structured reports for teams  
+- Feed insights into content optimization pipelines  
+- Enable scalable SEO analysis across multiple websites  
+
+This system can be triggered automatically via workflows or APIs to run audits without manual intervention.
 
 👉 Designed to reduce repetitive manual SEO work significantly
 
