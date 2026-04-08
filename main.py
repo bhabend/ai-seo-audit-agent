@@ -79,10 +79,11 @@ def run_audit(start_url):
 
 
 if __name__ == "__main__":
-    print("Running automated SEO audit pipeline...")
+    print("[START] Running automated SEO audit pipeline...")
 
     url = "https://www.directmeds.com.au/"
     df = run_audit(url)
 
     df.to_csv("output/audit_report_v3.csv", index=False)
-    print("Audit completed. Saved as audit_report_v3.csv")
+
+    print("[DONE] Audit completed. Output saved to output/audit_report_v3.csv")
