@@ -137,7 +137,11 @@ def test_in_sitemap_and_in_crawl_flags_cover_all_three_cases(tmp_path):
     }
     assert run.summary["sitemap"]["source"] == "guess"
     assert [i["url"] for i in run.issues_of("crawl_only_page")] == [BASE + "/linked"]
-    assert [i["url"] for i in run.issues_of("sitemap_only_page")] == [BASE + "/orphan"]
+    # A1: the unlinked sitemap page is reported once, as an orphan whose
+    # detail states its sitemap membership.
+    orphans = run.page_issues_of("orphan_page")
+    assert [i["final_url"] for i in orphans] == [BASE + "/orphan"]
+    assert "also listed in sitemap: yes" in orphans[0]["detail"]
 
 
 def test_non_html_urls_are_recorded_but_not_parsed_for_links(tmp_path):

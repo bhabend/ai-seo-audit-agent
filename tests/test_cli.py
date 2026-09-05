@@ -18,7 +18,9 @@ def test_flags_reach_the_parser():
     assert args.sweep_limit == 10000
     assert args.sweep_delay == 0.25
     assert args.canonical_check_limit == 500
-    assert args.external_check_limit == 200
+    assert args.external_check_limit == 1000
+    assert args.pagespeed_templates == 15
+    assert args.no_pagespeed is False
     assert args.write_links is False
 
 
@@ -28,8 +30,9 @@ def test_cli_writes_every_artefact_and_prints_the_summary(tmp_path, capsys):
             BASE + "/": html_page(["/about"]),
             BASE + "/about": html_page([]),
         })
+        # --no-pagespeed keeps the test off the key and the API entirely.
         code = main(["--domain", "example.com", "--out", str(tmp_path),
-                     "--delay", "0", "--workers", "2"])
+                     "--delay", "0", "--workers", "2", "--no-pagespeed"])
 
     assert code == 0
     assert sorted(os.listdir(str(tmp_path))) == [

@@ -47,9 +47,6 @@ CRAWLER_EFFECT: Dict[str, str] = {
     "crawl_only_page":
         "The page is reachable by links but missing from the sitemap, so "
         "discovery depends entirely on internal linking.",
-    "sitemap_only_page":
-        "The sitemap lists this page but no crawled page links to it, so it "
-        "receives no internal link equity and depends on the sitemap alone.",
     "deep_page":
         "Pages more than three clicks from the homepage are crawled less "
         "often and tend to rank worse.",
@@ -136,6 +133,13 @@ PAGE_ISSUE_SEVERITY: Dict[str, str] = {
     "duplicate_content": "medium",
     "near_duplicate_content": "low",
     "schema_microdata_only": "low",
+    # performance, measured on a template sample
+    "performance_poor": "medium",
+    "lcp_poor": "medium",
+    "cls_poor": "medium",
+    "inp_poor": "medium",
+    "performance_no_field_data": "info",
+    "pagespeed_error": "info",
     # site level, recorded once on the homepage row
     "http_to_https_redirect": "high",
     "hsts_missing": "medium",
@@ -327,7 +331,7 @@ class PageIssueLog:
     def severity_counts(self) -> Dict[str, int]:
         with self._lock:
             return {level: self._severity_counts[level]
-                    for level in ("high", "medium", "low")
+                    for level in ("high", "medium", "low", "info")
                     if self._severity_counts[level]}
 
     def total(self) -> int:

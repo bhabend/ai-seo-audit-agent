@@ -21,7 +21,35 @@ EXTERNAL_HOSTS = (
     "https://partner.com/",
     "https://dead.com/gone",
     "https://blog.example.com/post",
+    "https://aaa-rare.com/",
 )
+
+# A minimal but realistically shaped PageSpeed response.
+def pagespeed_payload(score=0.92, lcp=2200.0, cls=0.04, tbt=120.0,
+                      field_level="url", inp=180.0):
+    payload = {
+        "lighthouseResult": {
+            "fetchTime": "2026-09-05T12:00:00.000Z",
+            "categories": {"performance": {"score": score}},
+            "audits": {
+                "largest-contentful-paint": {"numericValue": lcp},
+                "cumulative-layout-shift": {"numericValue": cls},
+                "total-blocking-time": {"numericValue": tbt},
+                "first-contentful-paint": {"numericValue": 900.0},
+                "speed-index": {"numericValue": 1800.0},
+            },
+        }
+    }
+    metrics = {
+        "LARGEST_CONTENTFUL_PAINT_MS": {"percentile": lcp},
+        "INTERACTION_TO_NEXT_PAINT": {"percentile": inp},
+        "CUMULATIVE_LAYOUT_SHIFT_SCORE": {"percentile": cls * 100},
+    }
+    if field_level == "url":
+        payload["loadingExperience"] = {"metrics": metrics}
+    elif field_level == "origin":
+        payload["originLoadingExperience"] = {"metrics": metrics}
+    return payload
 
 
 def make_config(**overrides) -> AuditConfig:
@@ -33,6 +61,7 @@ def make_config(**overrides) -> AuditConfig:
         max_depth=5,
         workers=2,
         timeout=5,
+        pagespeed=False,
     )
     kwargs.update(overrides)
     return AuditConfig(**kwargs)
@@ -53,9 +82,13 @@ def register_site(mock, pages, robots=None, sitemaps=None):
     `pages` maps absolute URL -> html string (or a dict of kwargs for the mock).
     robots.txt and the conventional sitemap paths 404 unless supplied.
     """
-    # Lesson 7: every request path the new code can take is registered up
-    # front, so a missing mock never masquerades as a code failure. The
-    # external-link check HEADs whatever hosts a fixture links to.
+    # Lesson 4/7: every request path the new code can take is registered up
+    # front, so a missing mock never masquerades as a code failure. That now
+    # includes the PageSpeed endpoint, which the scoring stage calls.
+    from seo_audit.pagespeed import ENDPOINT
+    mock.get(ENDPOINT, json=pagespeed_payload())
+
+    # The external-link check HEADs whatever hosts a fixture links to.
     for host in EXTERNAL_HOSTS:
         mock.head(host, status_code=200,
                   headers={"Content-Type": "text/html"})
@@ -112,6 +145,8 @@ class Run:
         self.pages = read_rows(outcome.paths["audit_pages_csv"])
         self.links = (read_rows(outcome.paths["links_csv"])
                       if "links_csv" in outcome.paths else [])
+        self.pagespeed = (read_rows(outcome.paths["pagespeed_csv"])
+                          if "pagespeed_csv" in outcome.paths else [])
         self.page_issues = read_rows(outcome.paths["page_issues_csv"])
         with open(outcome.paths["crawl_summary_json"], encoding="utf-8") as fh:
             self.summary = json.load(fh)

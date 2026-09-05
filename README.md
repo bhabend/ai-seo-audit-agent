@@ -12,9 +12,10 @@ Read that first.
 ## What is built so far
 
 The crawl layer (URL discovery and fetch), the page layer (field extraction,
-JSON-LD and validation), and the link and content layer (internal link graph,
-duplicate detection). Scoring, the report and the Streamlit console are not
-built yet. The sections below describe only what runs today.
+JSON-LD and validation), the link and content layer (internal link graph,
+duplicate detection), and performance and scoring (PageSpeed on a template
+sample, a weighted page and site score). The report and the Streamlit console
+are not built yet. The sections below describe only what runs today.
 
 ## Install
 
@@ -22,8 +23,18 @@ built yet. The sections below describe only what runs today.
 pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` when the report stage arrives; no key is needed
-for the crawl.
+Copy `.env.example` to `.env` and fill in what you have:
+
+```
+OPENAI_API_KEY=
+PAGESPEED_API_KEY=
+```
+
+No key is needed for the crawl, the page checks, the link graph or scoring.
+`PAGESPEED_API_KEY` (a free Google API key) enables the performance sample;
+without it that one stage is skipped and the summary says so. Keys are read
+from the environment only -- never passed on the command line, never written
+to any output file. `.env` is gitignored.
 
 ## Run
 
@@ -99,6 +110,9 @@ later. All four files are UTF-8 with a BOM, so Excel opens them cleanly.
   default because the edge list is an order of magnitude larger than the page
   list and the per-page aggregates answer most questions; turn it on when you
   want to trace individual links.
+- **`pagespeed.csv`** (only when the performance sample runs): one row per
+  sampled URL per strategy, with the template it stands for, the group size,
+  the performance score, the lab metrics and the CrUX field metrics.
 - **`crawl_summary.json`**: the run in numbers, including per-type issue
   counts, page issue counts by type and severity, schema type counts, link
   and content totals, the sweep totals and the depth distribution.
@@ -160,6 +174,63 @@ word shingles. Exact duplicates group by md5; near-duplicates group by simhash
 Hamming distance of 3 or less. Pages under 200 words are never compared, since
 navigation furniture repeats across a site and would group everything. The
 page text itself is never stored.
+
+## Performance
+
+PageSpeed Insights is run on a **sample of templates, not of pages**. Pages
+are grouped by path shape -- `/blog/post-one` and `/blog/post-two` are one
+template, `/blog/x` and `/pricing/x` are two -- and the best-linked page in
+each group is measured as its representative. That is what lets the audit say
+"the product template, 212 pages, scores 34 on mobile" instead of "one page
+scored 34".
+
+The cost ceiling is structural: **2 calls per sampled URL** (mobile and
+desktop), on the homepage plus `--pagespeed-templates` groups. At the default
+of 15 that is **at most 32 calls per run**, and no site shape can exceed it.
+A 429 or 5xx is retried once after 10 seconds; a second failure becomes a
+`pagespeed_error` row rather than a crash.
+
+Both lab and field data are recorded. Field (CrUX) data is real users and is
+preferred; when there is none at URL level the origin is used, and
+`field_data_level` says which. Pages with no field data at all raise
+`performance_no_field_data`, because a lab number alone is a weaker claim.
+The raw API response is discarded; only the extracted metrics are stored.
+
+## Scoring
+
+A page starts at 100 and loses points from six buckets:
+
+| Bucket | Weight |
+| --- | --- |
+| indexability | 25 |
+| technical | 20 |
+| on_page | 20 |
+| content | 15 |
+| schema | 10 |
+| links | 10 |
+
+Each issue subtracts its points from its bucket, **each bucket floors at
+zero**, and the page score is the sum of the buckets. The floor matters: a
+page with a dozen on-page faults should not rank below a page that cannot be
+indexed at all.
+
+`site_score` is the mean page score when the performance sample did not run,
+and `0.85 x mean page score + 0.15 x mean mobile performance` when it did.
+The summary states which of the two it is, and the note spells out the mix.
+
+The weights live in **`seo_audit/score_weights.json`**, which is data, not
+code: edit the numbers there to retune the audit without touching Python.
+Every registered issue type must appear in that file -- a test fails the
+build if one is missing or if a weight names a type nobody registered, so an
+unscorable issue can never become a silent zero. Crawl-layer types are listed
+with `bucket: null`: they describe the crawl, not a page, and never affect a
+score.
+
+Performance issue types carry **zero points** in the page score by design.
+Only the sampled page of each template gets those rows, so deducting would
+punish a page for being the one that was measured while its identical
+siblings scored full marks. Performance is scored once instead, as the site
+score's 15% component.
 
 ## What gets parsed, and what a check is keyed on
 
@@ -225,7 +296,9 @@ All tests are offline: no network, no API keys.
 - `seo_audit/`: the package. All audit logic lives here.
   - `crawl.py` fetches; `parse.py` reads a page's fields; `schema.py` reads
     its JSON-LD; `links.py` builds the internal link graph; `content.py`
-    fingerprints the text; `validate.py` turns those facts into findings.
+    fingerprints the text; `validate.py` turns those facts into findings;
+    `pagespeed.py` samples templates for performance; `scoring.py` applies
+    `score_weights.json` to produce page and site scores.
   - A page gets exactly one BeautifulSoup pass, shared by link extraction,
     field parsing and JSON-LD, and the HTML is released inside the worker
     before the next page starts.
@@ -238,7 +311,7 @@ All tests are offline: no network, no API keys.
 
 1. Crawl layer (done)
 2. Parse, technical validation, schema validation, sitemap hygiene (done)
-3. Links and content similarity (done); PageSpeed sample and scoring
+3. Links and content similarity, PageSpeed sample and scoring (done)
 4. Findings JSON, report narrative, docx report, baseline vs full mode
 5. Streamlit console with optional Search Console upload
 

@@ -89,8 +89,8 @@ def test_orphan_page_excludes_the_homepage_and_states_the_cap(tmp_path):
         run.page_issues_of("orphan_page")[0]["detail"]
 
 
-def test_sitemap_only_page_needs_a_crawled_unlinked_sitemap_url(tmp_path):
-    """A2: swept-only URLs never raise it, and the detail states the cap."""
+def test_orphan_page_states_sitemap_membership_and_replaces_sitemap_only(tmp_path):
+    """A1: one finding, not two. The old sitemap_only_page is gone."""
     sitemap = f"""<?xml version="1.0"?><urlset>
       <url><loc>{BASE}/</loc></url>
       <url><loc>{BASE}/linked</loc></url>
@@ -98,20 +98,42 @@ def test_sitemap_only_page_needs_a_crawled_unlinked_sitemap_url(tmp_path):
       <url><loc>{BASE}/never-crawled</loc></url>
     </urlset>"""
     run = crawl_site(tmp_path, {
-        BASE + "/": linked([("/linked", "Linked page")]),
+        BASE + "/": linked([("/linked", "Linked page"), ("/stray", "Stray")]),
         BASE + "/linked": linked([]),
         BASE + "/unlinked": linked([]),
+        BASE + "/stray": linked([]),
         BASE + "/never-crawled": linked([]),
-    }, sitemaps={BASE + "/sitemap.xml": sitemap}, max_pages=3)
+    }, sitemaps={BASE + "/sitemap.xml": sitemap}, max_pages=4)
 
-    reported = [i["url"] for i in run.issues_of("sitemap_only_page")]
-    assert BASE + "/unlinked" in reported
-    assert BASE + "/linked" not in reported          # it has an inbound link
-    assert BASE + "/" not in reported                # homepage never counts
-    # Swept but never crawled: we cannot know if anything links to it.
-    assert BASE + "/never-crawled" not in reported
-    assert "within the 3 pages this run crawled" in \
-        run.issues_of("sitemap_only_page")[0]["detail"]
+    orphans = {i["final_url"]: i["detail"]
+               for i in run.page_issues_of("orphan_page")}
+    assert BASE + "/unlinked" in orphans
+    assert "also listed in sitemap: yes" in orphans[BASE + "/unlinked"]
+    assert "within the 4 pages this run crawled" in orphans[BASE + "/unlinked"]
+
+    # Linked pages and the homepage are never orphans.
+    assert BASE + "/linked" not in orphans
+    assert BASE + "/" not in orphans
+
+    # The type is retired: no rows, and it is not even registered any more.
+    from seo_audit.issues import CRAWLER_EFFECT, PAGE_ISSUE_SEVERITY
+    assert "sitemap_only_page" not in CRAWLER_EFFECT
+    assert "sitemap_only_page" not in PAGE_ISSUE_SEVERITY
+    assert all(i["issue_type"] != "sitemap_only_page" for i in run.issues)
+    assert run.summary["links"]["orphan_pages_in_sitemap"] >= 1
+
+
+def test_orphan_outside_the_sitemap_says_so(tmp_path):
+    sitemap = f'<?xml version="1.0"?><urlset><url><loc>{BASE}/</loc></url></urlset>'
+    run = crawl_site(tmp_path, {
+        BASE + "/": linked([("/a", "A")]),
+        BASE + "/a": linked([]),
+        BASE + "/stray": linked([]),
+    }, sitemaps={BASE + "/sitemap.xml": sitemap})
+    # /stray is unreachable by link and not in the sitemap, so it is not
+    # crawled at all -- nothing to report. The homepage and /a are fine.
+    assert run.page_issues_of("orphan_page") == []
+    assert run.summary["links"]["orphan_pages_in_sitemap"] == 0
 
 
 def test_low_inlink_page_is_reported_separately(tmp_path):
@@ -223,6 +245,34 @@ def test_external_check_limit_leaves_the_rest_unchecked_not_assumed(tmp_path):
     assert stats["external_checked"] == 1
     assert stats["external_unchecked"] == 2
     assert stats["external_check_limit"] == 1
+
+
+def test_external_check_limit_default_is_one_thousand():
+    from seo_audit.config import AuditConfig
+    assert AuditConfig(domain="example.com").external_check_limit == 1000
+
+
+def test_the_most_linked_external_targets_are_checked_first(tmp_path):
+    """A2: under a cap, a link used everywhere must not lose to alphabet."""
+    def extra(mock):
+        # The busiest target is dead; the rarely used one is alphabetically
+        # first, so alphabetical order would check it and miss the real fault.
+        mock.head("https://dead.com/gone", status_code=404,
+                  headers={"Content-Type": "text/html"})
+
+    pages = {BASE + "/": linked([("https://dead.com/gone", "Everywhere"),
+                                 ("https://aaa-rare.com/", "Once"),
+                                 ("/a", "A"), ("/b", "B")])}
+    for name in ("a", "b"):
+        pages[f"{BASE}/{name}"] = linked([("https://dead.com/gone", "Everywhere")])
+
+    run = crawl_site(tmp_path, pages, extra=extra, external_check_limit=1)
+
+    # One check, spent on the target three pages link to.
+    assert run.summary["links"]["external_checked"] == 1
+    broken = run.page_issues_of("external_link_broken")
+    assert [b["url"] for b in broken] == ["https://dead.com/gone"]
+    assert "linked from 3 page(s)" in broken[0]["detail"]
 
 
 # --- --write-links ----------------------------------------------------------

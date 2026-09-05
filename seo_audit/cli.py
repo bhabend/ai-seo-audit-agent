@@ -6,6 +6,8 @@ import argparse
 import json
 import sys
 
+from dotenv import load_dotenv
+
 from .config import AuditConfig
 from .crawl import run_crawl
 from .output import build_summary
@@ -46,14 +48,23 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Most canonical targets outside the crawl that "
                              "will be checked with HEAD (default 200). The "
                              "rest are reported as unchecked.")
-    parser.add_argument("--external-check-limit", type=int, default=200,
+    parser.add_argument("--external-check-limit", type=int, default=1000,
                         help="Most distinct external link targets to check "
-                             "with HEAD (default 200). The rest are counted "
-                             "as unchecked, never assumed working.")
+                             "with HEAD (default 1000), most-linked first. "
+                             "The rest are counted as unchecked, never "
+                             "assumed working.")
     parser.add_argument("--write-links", action="store_true",
                         help="Also write links.csv (source, target, anchor, "
                              "nofollow). Off by default: the edge list is "
                              "far larger than the page list.")
+    parser.add_argument("--pagespeed-templates", type=int, default=15,
+                        help="Page templates to sample with PageSpeed "
+                             "Insights (default 15). The homepage is always "
+                             "included, and each sampled URL costs two calls "
+                             "(mobile and desktop), so the default is at most "
+                             "32 calls. Needs PAGESPEED_API_KEY in .env.")
+    parser.add_argument("--no-pagespeed", action="store_true",
+                        help="Skip the performance sample entirely.")
     parser.add_argument("--timeout", type=int, default=20)
     parser.add_argument("--no-robots", action="store_true",
                         help="Do not fetch or obey robots.txt.")
@@ -69,6 +80,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    # Keys come from the environment only, never from the command line.
+    load_dotenv()
 
     config = AuditConfig(
         domain=args.domain,
@@ -83,6 +96,8 @@ def main(argv=None) -> int:
         canonical_check_limit=args.canonical_check_limit,
         external_check_limit=args.external_check_limit,
         write_links=args.write_links,
+        pagespeed_templates=args.pagespeed_templates,
+        pagespeed=not args.no_pagespeed,
         timeout=args.timeout,
         respect_robots=not args.no_robots,
         include_subdomains=args.include_subdomains,
@@ -99,10 +114,12 @@ def main(argv=None) -> int:
     for label, key in (("raw crawl    ", "raw_crawl_csv"),
                        ("audit pages  ", "audit_pages_csv"),
                        ("page issues  ", "page_issues_csv"),
+                       ("pagespeed   ", "pagespeed_csv"),
                        ("sitemap sweep", "sitemap_sweep_csv"),
                        ("crawl issues ", "crawl_issues_csv"),
                        ("summary      ", "crawl_summary_json")):
-        print(f"{label}: {outcome.paths[key]}", file=sys.stderr)
+        if key in outcome.paths:
+            print(f"{label}: {outcome.paths[key]}", file=sys.stderr)
     return 0
 
 

@@ -1,0 +1,378 @@
+{
+  "_comment": [
+    "Weights for the page score. Data, not code: edit this file to retune.",
+    "A page starts at 100. Each issue subtracts its points from its bucket;",
+    "each bucket floors at 0 so one bad area cannot sink the whole score.",
+    "The page score is the sum of the six buckets.",
+    "scope 'page' means the issue is a fault of that page; 'once' means it is",
+    "a group or site finding attached to one representative page.",
+    "Crawl-layer types have bucket null: they describe the crawl, not a page."
+  ],
+  "buckets": {
+    "indexability": 25,
+    "technical": 20,
+    "on_page": 20,
+    "content": 15,
+    "schema": 10,
+    "links": 10
+  },
+  "page_issues": {
+    "broken_internal_link": {
+      "bucket": "links",
+      "points": 6,
+      "scope": "once"
+    },
+    "canonical_chain": {
+      "bucket": "indexability",
+      "points": 8,
+      "scope": "page"
+    },
+    "canonical_missing": {
+      "bucket": "indexability",
+      "points": 5,
+      "scope": "page"
+    },
+    "canonical_not_absolute": {
+      "bucket": "indexability",
+      "points": 2,
+      "scope": "page"
+    },
+    "canonical_off_page": {
+      "bucket": "indexability",
+      "points": 10,
+      "scope": "page"
+    },
+    "canonical_target_noindex": {
+      "bucket": "indexability",
+      "points": 15,
+      "scope": "page"
+    },
+    "canonical_target_non_200": {
+      "bucket": "indexability",
+      "points": 15,
+      "scope": "page"
+    },
+    "canonical_target_not_crawled": {
+      "bucket": "indexability",
+      "points": 5,
+      "scope": "page"
+    },
+    "canonical_target_unchecked": {
+      "bucket": "indexability",
+      "points": 1,
+      "scope": "page"
+    },
+    "cls_poor": {
+      "bucket": "technical",
+      "points": 0,
+      "scope": "page"
+    },
+    "csp_missing": {
+      "bucket": "technical",
+      "points": 2,
+      "scope": "once"
+    },
+    "duplicate_content": {
+      "bucket": "content",
+      "points": 12,
+      "scope": "once"
+    },
+    "duplicate_meta_description": {
+      "bucket": "on_page",
+      "points": 4,
+      "scope": "once"
+    },
+    "duplicate_title": {
+      "bucket": "on_page",
+      "points": 8,
+      "scope": "once"
+    },
+    "external_link_broken": {
+      "bucket": "links",
+      "points": 3,
+      "scope": "once"
+    },
+    "generic_anchor": {
+      "bucket": "links",
+      "points": 2,
+      "scope": "page"
+    },
+    "h1_missing": {
+      "bucket": "on_page",
+      "points": 6,
+      "scope": "page"
+    },
+    "h1_multiple": {
+      "bucket": "on_page",
+      "points": 2,
+      "scope": "page"
+    },
+    "hreflang_not_reciprocal": {
+      "bucket": "technical",
+      "points": 5,
+      "scope": "page"
+    },
+    "hreflang_target_non_200": {
+      "bucket": "technical",
+      "points": 6,
+      "scope": "page"
+    },
+    "hsts_missing": {
+      "bucket": "technical",
+      "points": 4,
+      "scope": "once"
+    },
+    "html_lang_missing": {
+      "bucket": "technical",
+      "points": 3,
+      "scope": "page"
+    },
+    "http_to_https_redirect": {
+      "bucket": "indexability",
+      "points": 15,
+      "scope": "once"
+    },
+    "images_missing_alt": {
+      "bucket": "on_page",
+      "points": 3,
+      "scope": "page"
+    },
+    "inp_poor": {
+      "bucket": "technical",
+      "points": 0,
+      "scope": "page"
+    },
+    "lcp_poor": {
+      "bucket": "technical",
+      "points": 0,
+      "scope": "page"
+    },
+    "low_inlink_page": {
+      "bucket": "links",
+      "points": 3,
+      "scope": "page"
+    },
+    "meta_description_missing": {
+      "bucket": "on_page",
+      "points": 8,
+      "scope": "page"
+    },
+    "meta_description_too_long": {
+      "bucket": "on_page",
+      "points": 3,
+      "scope": "page"
+    },
+    "mixed_content": {
+      "bucket": "technical",
+      "points": 12,
+      "scope": "page"
+    },
+    "near_duplicate_content": {
+      "bucket": "content",
+      "points": 6,
+      "scope": "once"
+    },
+    "nofollow_internal_link": {
+      "bucket": "links",
+      "points": 2,
+      "scope": "page"
+    },
+    "nofollow_page": {
+      "bucket": "indexability",
+      "points": 8,
+      "scope": "page"
+    },
+    "noindex_page": {
+      "bucket": "indexability",
+      "points": 25,
+      "scope": "page"
+    },
+    "orphan_page": {
+      "bucket": "links",
+      "points": 8,
+      "scope": "page"
+    },
+    "pagespeed_error": {
+      "bucket": "technical",
+      "points": 0,
+      "scope": "page"
+    },
+    "performance_no_field_data": {
+      "bucket": "technical",
+      "points": 0,
+      "scope": "page"
+    },
+    "performance_poor": {
+      "bucket": "technical",
+      "points": 0,
+      "scope": "page"
+    },
+    "redirected_internal_link": {
+      "bucket": "links",
+      "points": 2,
+      "scope": "once"
+    },
+    "schema_invalid_json": {
+      "bucket": "schema",
+      "points": 7,
+      "scope": "page"
+    },
+    "schema_microdata_only": {
+      "bucket": "schema",
+      "points": 2,
+      "scope": "page"
+    },
+    "schema_missing": {
+      "bucket": "schema",
+      "points": 5,
+      "scope": "page"
+    },
+    "schema_missing_property": {
+      "bucket": "schema",
+      "points": 3,
+      "scope": "page"
+    },
+    "sitemap_noindex": {
+      "bucket": "indexability",
+      "points": 12,
+      "scope": "page"
+    },
+    "sitemap_off_canonical": {
+      "bucket": "indexability",
+      "points": 6,
+      "scope": "page"
+    },
+    "thin_page": {
+      "bucket": "content",
+      "points": 10,
+      "scope": "page"
+    },
+    "title_missing": {
+      "bucket": "on_page",
+      "points": 12,
+      "scope": "page"
+    },
+    "title_too_long": {
+      "bucket": "on_page",
+      "points": 4,
+      "scope": "page"
+    },
+    "title_too_short": {
+      "bucket": "on_page",
+      "points": 4,
+      "scope": "page"
+    },
+    "viewport_missing": {
+      "bucket": "technical",
+      "points": 8,
+      "scope": "page"
+    },
+    "x_content_type_options_missing": {
+      "bucket": "technical",
+      "points": 2,
+      "scope": "once"
+    },
+    "x_frame_options_missing": {
+      "bucket": "technical",
+      "points": 2,
+      "scope": "once"
+    }
+  },
+  "crawl_issues": {
+    "ai_crawler_rule": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "crawl_only_page": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "deep_page": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "document_linked": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "fetch_error": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "host_redirect": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "multiple_sitemaps": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "non_html_linked": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "redirect_chain": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "redirect_in_sitemap": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "redirect_loop": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "render_suspect": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "robots_blocked_in_sitemap": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "robots_blocked_linked": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "sitemap_non_200": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "sitemap_sweep_capped": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "slow_response": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "sweep_throttled": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
+    "trailing_slash_redirect": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    }
+  }
+}

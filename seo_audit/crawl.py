@@ -36,7 +36,9 @@ from .output import (AUDIT_PAGE_COLUMNS, CSV_COLUMNS, SWEEP_COLUMNS,
 from .content import MIN_WORDS_FOR_COMPARISON, ContentIndex, fingerprint
 from .links import (LinkGraph, cap_note, describe_referrers,
                     is_generic_anchor)
+from .pagespeed import PAGESPEED_COLUMNS, issues_for, run_pagespeed
 from .parse import is_document_url, parse_page
+from .scoring import ScoreBoard, load_weights, score_page
 from .schema import parse_schema
 from .urlnorm import (distinct_targets, extract_links, is_same_site,
                       make_soup, normalize, slash_variant)
@@ -75,6 +77,8 @@ class CrawlOutcome:
     sweep_throttled_responses: int = 0
     link_stats: Dict[str, int] = field(default_factory=dict)
     content_stats: Dict[str, int] = field(default_factory=dict)
+    pagespeed_stats: Dict = field(default_factory=dict)
+    score_stats: Dict = field(default_factory=dict)
     canonical_targets_unchecked: int = 0
     page_issue_counts: Dict[str, int] = field(default_factory=dict)
     page_issue_severity: Dict[str, int] = field(default_factory=dict)
@@ -256,8 +260,9 @@ class _Crawler:
         if row.get("in_crawl") and not row.get("in_sitemap"):
             self.issues.add("crawl_only_page", url, referrer,
                             "reachable by links, absent from the sitemap")
-        # sitemap_only_page is NOT raised here: it needs the link graph, so
-        # it moved to the post-crawl pass where inlinks are actually known.
+        # Sitemap membership is not a finding on its own: an unlinked
+        # sitemap page is an orphan, reported once as orphan_page with its
+        # sitemap membership in the detail.
 
     # ---- fetching --------------------------------------------------------
 
@@ -548,6 +553,13 @@ def run_crawl(config: AuditConfig, out_dir: Optional[str] = None,
         _run_link_and_content_checks(crawler, page_issues, pages_csv, out_dir)
         _run_cross_page_checks(crawler, page_issues)
         _run_site_level_checks(crawler, page_issues, home_row, home_headers)
+        _run_pagespeed(crawler, page_issues, out_dir)
+
+        # Every finding is in now, so the pages can be scored and the file
+        # finished in one pass.
+        page_issues.close()
+        pages_csv.close()
+        _finalise_pages(crawler, pages_csv.path, paths["page_issues_csv"])
 
         outcome.html_files_kept = html_store.files_written
         outcome.issue_counts = issues.counts()
@@ -824,6 +836,7 @@ def _run_link_and_content_checks(crawler: _Crawler, page_issues: PageIssueLog,
     home_final = crawler.url_to_final.get(home, home)
 
     zero_inlinks = 0
+    orphans_in_sitemap = 0
     for final_url, record in crawler.index.pages.items():
         stats = per_page.get(final_url)
         if stats is None:
@@ -831,9 +844,13 @@ def _run_link_and_content_checks(crawler: _Crawler, page_issues: PageIssueLog,
         if stats.inlinks == 0:
             zero_inlinks += 1
             if final_url != home_final:
+                if record.in_sitemap:
+                    orphans_in_sitemap += 1
                 page_issues.add(
                     "orphan_page", record.url, final_url,
-                    f"no crawled page links here, {within}")
+                    f"no crawled page links here, {within}; "
+                    f"also listed in sitemap: "
+                    f"{'yes' if record.in_sitemap else 'no'}")
         elif stats.inlinks == 1:
             page_issues.add("low_inlink_page", record.url, final_url,
                             f"exactly 1 inbound link {within}")
@@ -851,14 +868,6 @@ def _run_link_and_content_checks(crawler: _Crawler, page_issues: PageIssueLog,
                 f"every inbound anchor is generic: "
                 f"{', '.join(sorted(set(anchors))[:5])}")
 
-        # A2: only a crawled sitemap page with no inbound link is orphaned by
-        # the sitemap's own account. Swept-only URLs never qualify.
-        if (record.in_sitemap and stats.inlinks == 0
-                and final_url != home_final):
-            crawler.issues.add(
-                "sitemap_only_page", final_url, None,
-                f"listed in the sitemap, crawled, and no crawled page links "
-                f"here ({within})")
 
     # --- targets the crawl saw as broken or redirecting ---
     broken = 0
@@ -889,8 +898,11 @@ def _run_link_and_content_checks(crawler: _Crawler, page_issues: PageIssueLog,
                         f"links point at {url}, which redirects to {final}; "
                         f"{describe_referrers(sources)}")
 
-    # --- external links, capped ---
-    external = sorted(crawler.graph.external_targets)
+    # --- external links, capped, most-used first ---
+    # Alphabetical order made the cap arbitrary: a link used on 500 pages was
+    # no likelier to be checked than one used once.
+    external = sorted(crawler.graph.external_targets,
+                      key=lambda t: (-len(crawler.graph.external_targets[t]), t))
     limit = config.external_check_limit
     checked = external[:limit]
     unchecked = len(external) - len(checked)
@@ -907,6 +919,7 @@ def _run_link_and_content_checks(crawler: _Crawler, page_issues: PageIssueLog,
 
     outcome.link_stats = {
         "pages_with_zero_inlinks": zero_inlinks,
+        "orphan_pages_in_sitemap": orphans_in_sitemap,
         "broken_internal_targets": broken,
         "redirected_internal_targets": redirected,
         "external_targets_found": len(external),
@@ -937,12 +950,10 @@ def _run_link_and_content_checks(crawler: _Crawler, page_issues: PageIssueLog,
         "min_words_for_comparison": MIN_WORDS_FOR_COMPARISON,
     }
 
-    # --- the per-page link columns, merged into audit_pages.csv ---
-    # The rows streamed during the crawl, before any of this was knowable.
-    # One row-by-row rewrite fills the link columns in without ever holding
-    # the page list in memory.
-    pages_csv.close()
-    _merge_link_columns(pages_csv.path, per_page)
+    # The link columns are merged in one final rewrite, after PageSpeed and
+    # the cross-page checks have had their say, so audit_pages.csv is written
+    # over exactly once rather than once per stage.
+    crawler.per_page = per_page
 
     if config.write_links:
         links_csv = StreamingCsv(os.path.join(out_dir, "links.csv"),
@@ -957,28 +968,88 @@ def _run_link_and_content_checks(crawler: _Crawler, page_issues: PageIssueLog,
         crawler.outcome.paths["links_csv"] = os.path.join(out_dir, "links.csv")
 
 
-def _merge_link_columns(path: str, per_page: Dict[str, object]) -> None:
-    """Fill in the link columns on an already-streamed audit_pages.csv.
 
-    Reads and writes one row at a time, so a 2,000-page file costs one row of
-    memory, not two thousand.
+def _run_pagespeed(crawler: _Crawler, page_issues: PageIssueLog,
+                   out_dir: str) -> None:
+    """Measure a sample of templates, or say plainly why we did not."""
+    config = crawler.config
+    per_page = getattr(crawler, "per_page", {})
+    pages = [(final_url, getattr(per_page.get(final_url), "inlinks", 0), 0)
+             for final_url in crawler.index.pages]
+    home = normalize(config.start_url)
+    home_final = crawler.url_to_final.get(home, home)
+    if home_final not in crawler.index.pages:
+        home_final = None
+
+    run = run_pagespeed(crawler.fetcher, pages, home_final,
+                        limit=config.pagespeed_templates,
+                        enabled=config.pagespeed)
+    crawler.pagespeed = run
+    crawler.outcome.pagespeed_stats = run.summary()
+
+    if run.skipped:
+        return
+
+    path = os.path.join(out_dir, "pagespeed.csv")
+    csv_out = StreamingCsv(path, PAGESPEED_COLUMNS)
+    try:
+        for result in run.results:
+            csv_out.write(result.as_row())
+            for issue_type, detail in issues_for(result):
+                page_issues.add(issue_type, result.url, result.url, detail)
+    finally:
+        csv_out.close()
+    crawler.outcome.paths["pagespeed_csv"] = path
+
+
+def _finalise_pages(crawler: _Crawler, pages_path: str,
+                    page_issues_path: str) -> None:
+    """Score every parsed page and write the last version of audit_pages.csv.
+
+    Issues are read back from page_issues.csv rather than kept in memory: it
+    is the record of what was actually found, including everything the
+    post-crawl passes added after a page's row was already written.
     """
     import csv as _csv
-    import tempfile
 
-    temp_path = path + ".merging"
-    with open(path, encoding="utf-8-sig", newline="") as source,             open(temp_path, "w", encoding="utf-8-sig", newline="") as target:
+    weights = load_weights()
+    board = ScoreBoard(weights)
+    per_page = getattr(crawler, "per_page", {})
+
+    by_page: Dict[str, List[str]] = {}
+    with open(page_issues_path, encoding="utf-8-sig", newline="") as handle:
+        for row in _csv.DictReader(handle):
+            key = row.get("final_url") or row.get("url")
+            if key:
+                by_page.setdefault(key, []).append(row["issue_type"])
+
+    temp_path = pages_path + ".scoring"
+    with open(pages_path, encoding="utf-8-sig", newline="") as source,             open(temp_path, "w", encoding="utf-8-sig", newline="") as target:
         reader = _csv.DictReader(source)
         writer = _csv.DictWriter(target, fieldnames=AUDIT_PAGE_COLUMNS,
                                  extrasaction="ignore")
         writer.writeheader()
         for row in reader:
-            stats = per_page.get(row.get("final_url"))
+            final_url = row.get("final_url") or row.get("url")
+
+            stats = per_page.get(final_url)
             if stats is not None:
                 row["inlinks"] = stats.inlinks
                 row["nofollow_inlinks"] = stats.nofollow_inlinks
                 row["outlinks_internal"] = stats.outlinks_internal
                 row["outlinks_external"] = stats.outlinks_external
                 row["anchor_texts"] = ";".join(stats.anchor_texts)
+
+            found = by_page.get(final_url, [])
+            page = score_page(found, weights, final_url)
+            board.add(page)
+            row.update(page.as_columns())
+            row["issue_count"] = len(found)
+            row["issues"] = ";".join(sorted(set(found)))
             writer.writerow(row)
-    os.replace(temp_path, path)
+    os.replace(temp_path, pages_path)
+
+    run = getattr(crawler, "pagespeed", None)
+    mobile = [r.performance_score for r in (run.results if run else [])
+              if r.strategy == "mobile"]
+    crawler.outcome.score_stats = board.site_score(mobile).as_summary()
