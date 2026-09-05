@@ -159,8 +159,12 @@ def test_non_html_urls_are_recorded_but_not_parsed_for_links(tmp_path):
     assert found[BASE + "/brochure.pdf"]["text_chars"] == ""
     # The href inside the PDF bytes must not become a crawl target.
     assert BASE + "/hidden" not in found
-    assert {i["url"] for i in run.issues_of("non_html_linked")} == {
-        BASE + "/brochure.pdf", BASE + "/logo.png"}
+    # A PDF is an indexable document, not a defect; a PNG linked as a page is
+    # neither a page nor a document.
+    assert [i["url"] for i in run.issues_of("document_linked")] == [
+        BASE + "/brochure.pdf"]
+    assert [i["url"] for i in run.issues_of("non_html_linked")] == [
+        BASE + "/logo.png"]
 
 
 def test_duplicate_urls_collapse_to_one_row(tmp_path):
@@ -203,7 +207,7 @@ def test_slow_pages_are_reported(tmp_path, monkeypatch):
     run = crawl_site(tmp_path, {BASE + "/": html_page([])})
 
     assert [i["url"] for i in run.issues_of("slow_response")] == [BASE + "/"]
-    assert "5000 ms" in run.issues_of("slow_response")[0]["detail"]
+    assert "5000 ms for a page" in run.issues_of("slow_response")[0]["detail"]
 
 
 # --- decision A2: adopt the host the homepage actually redirects to ---------

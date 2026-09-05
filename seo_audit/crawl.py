@@ -28,11 +28,17 @@ from .config import AuditConfig
 from .discovery import (RobotsInfo, SitemapResult, discover_sitemaps,
                         effective_crawl_delay, fetch_robots)
 from .fetch import Fetcher, is_html_content_type
-from .issues import (DEEP_PAGE_DEPTH, RENDER_SUSPECT_CHARS, SLOW_RESPONSE_MS,
-                     IssueLog, ai_crawler_groups)
-from .output import (CSV_COLUMNS, SWEEP_COLUMNS, CrawlStats, HtmlStore,
-                     StreamingCsv, write_summary_json)
-from .urlnorm import extract_links, is_same_site, normalize, slash_variant
+from .issues import (DEEP_PAGE_DEPTH, RENDER_SUSPECT_CHARS, SLOW_DOCUMENT_MS,
+                     SLOW_RESPONSE_MS, IssueLog, PageIssueLog,
+                     ai_crawler_groups)
+from .output import (AUDIT_PAGE_COLUMNS, CSV_COLUMNS, SWEEP_COLUMNS,
+                     CrawlStats, HtmlStore, StreamingCsv, write_summary_json)
+from .parse import is_document_url, parse_page
+from .schema import parse_schema
+from .urlnorm import (extract_links, is_same_site, make_soup, normalize,
+                      slash_variant)
+from .validate import (CrossPageIndex, PageRecord, check_cross_page,
+                       check_page, check_site_level)
 
 # How many URLs are in flight at once, as a multiple of the worker count.
 # Caps how much page HTML can exist at any moment.
@@ -52,6 +58,10 @@ class CrawlOutcome:
     sweep_checked: int = 0
     sweep_already_crawled: int = 0
     sweep_blocked: int = 0
+    sitemap_urls_total: int = 0
+    sweep_capped: bool = False
+    page_issue_counts: Dict[str, int] = field(default_factory=dict)
+    page_issue_severity: Dict[str, int] = field(default_factory=dict)
     sweep_status_counts: Counter = field(default_factory=Counter)
     issue_counts: Dict[str, int] = field(default_factory=dict)
     html_files_kept: int = 0
@@ -69,11 +79,15 @@ class _Crawler:
 
     def __init__(self, config: AuditConfig, fetcher: Fetcher,
                  issues: IssueLog, rows: StreamingCsv, html_store: HtmlStore,
-                 outcome: CrawlOutcome):
+                 outcome: CrawlOutcome, pages: Optional[StreamingCsv] = None,
+                 page_issues: Optional[PageIssueLog] = None):
         self.config = config
         self.fetcher = fetcher
         self.issues = issues
         self.rows = rows
+        self.pages = pages
+        self.page_issues = page_issues
+        self.index = CrossPageIndex()
         self.html_store = html_store
         self.outcome = outcome
         self.robots: Optional[RobotsInfo] = None
@@ -104,7 +118,9 @@ class _Crawler:
                                 "robots.txt disallows this path")
         return False
 
-    def record(self, row: Dict, links: List[str]) -> None:
+    def record(self, row: Dict, links: List[str],
+               page: Optional[Dict] = None,
+               findings: Optional[List] = None) -> None:
         """Write one finished row and log what a search engine would hit."""
         url = row["url"]
         self.handled.add(url)
@@ -112,7 +128,12 @@ class _Crawler:
         row["in_sitemap"] = url in self.sitemap_set
         self.rows.write(row)
         self.outcome.stats.add(row)
+        self.index.note_status(url, row.get("status_code"))
+        if row.get("final_url"):
+            self.index.note_status(row["final_url"], row.get("status_code"))
         self._log_row_issues(row)
+        if page is not None:
+            self._record_page(row, page, findings or [])
 
         # A redirect we already followed: never spend a second fetch on the
         # destination, and say so when it is only a trailing slash apart.
@@ -125,6 +146,42 @@ class _Crawler:
                 self.issues.add(
                     "trailing_slash_redirect", url, row.get("discovered_from"),
                     f"redirects to {final_url}")
+
+    def _record_page(self, row: Dict, page: Dict, findings: List) -> None:
+        """Write the parsed fields and this page's own findings.
+
+        Everything here is keyed on final_url: the page that answered is the
+        page being judged.
+        """
+        final_url = row.get("final_url") or row["url"]
+        page["url"] = row["url"]
+        page["final_url"] = final_url
+        page["status_code"] = row.get("status_code")
+        page["in_sitemap"] = row.get("in_sitemap")
+        page["depth"] = row.get("depth")
+        page["issue_count"] = len(findings)
+        page["issues"] = ";".join(sorted({f[0] for f in findings}))
+
+        if self.pages is not None:
+            self.pages.write(page)
+        self.outcome.stats.pages_parsed += 1
+        for type_name in page.get("_schema_types", ()):  # counted, not written
+            self.outcome.stats.schema_type_counts[type_name] += 1
+
+        if self.page_issues is not None:
+            for issue_type, detail in findings:
+                self.page_issues.add(issue_type, row["url"], final_url, detail)
+
+        self.index.add_page(PageRecord(
+            url=row["url"],
+            final_url=final_url,
+            title=page.get("title") or None,
+            meta_description=page.get("meta_description") or None,
+            canonical=page.get("canonical") or None,
+            noindex=bool(page.get("_noindex")),
+            hreflang=list(page.get("_hreflang") or []),
+            in_sitemap=bool(row.get("in_sitemap")),
+        ))
 
     def _log_row_issues(self, row: Dict) -> None:
         url = row["url"]
@@ -146,15 +203,22 @@ class _Crawler:
             self.issues.add("deep_page", url, referrer,
                             f"{depth} clicks from the homepage")
         rt = row.get("response_time_ms")
-        if rt is not None and rt > SLOW_RESPONSE_MS:
-            self.issues.add("slow_response", url, referrer, f"{rt} ms")
+        is_document = is_document_url(url)
+        slow_limit = SLOW_DOCUMENT_MS if is_document else SLOW_RESPONSE_MS
+        if rt is not None and rt > slow_limit:
+            kind = "document" if is_document else "page"
+            self.issues.add("slow_response", url, referrer,
+                            f"{rt} ms for a {kind} (limit {slow_limit} ms)")
         text_chars = row.get("text_chars")
         if text_chars is not None and text_chars < RENDER_SUSPECT_CHARS:
             self.issues.add("render_suspect", url, referrer,
                             f"{text_chars} visible characters")
         if (row.get("in_crawl") and text_chars is None and not row.get("error")
                 and not is_html_content_type(row.get("content_type"))):
-            self.issues.add("non_html_linked", url, referrer,
+            # A PDF or Office file is indexable in its own right; anything
+            # else linked as a page is not.
+            kind = "document_linked" if is_document else "non_html_linked"
+            self.issues.add(kind, url, referrer,
                             f"content-type {row.get('content_type')}")
         if row.get("in_crawl") and not row.get("in_sitemap"):
             self.issues.add("crawl_only_page", url, referrer,
@@ -167,18 +231,31 @@ class _Crawler:
     # ---- fetching --------------------------------------------------------
 
     def _work(self, task: Tuple[str, Optional[int], bool, Optional[str]]):
-        """Runs on a worker thread. HTML is used and dropped in here."""
+        """Runs on a worker thread. HTML is used and dropped in here.
+
+        One soup per page, shared by link extraction, field parsing and
+        JSON-LD. Nothing HTML-shaped survives this function.
+        """
         url, depth, via_link, discovered_from = task
         result = self.fetcher.fetch(url)
         links: List[str] = []
+        page = None
+        findings: List = []
         if result.html:
             self.html_store.save(url, result.html)
             base = result.final_url or url
+            soup = make_soup(result.html)
+            all_links = extract_links(soup, base)
             links = [
-                href for href in extract_links(result.html, base)
+                href for href in all_links
                 if is_same_site(href, self.config.host,
                                 self.config.include_subdomains)
             ]
+            # Only a page that actually answered 200 is worth judging: a 404
+            # body is a real HTML page, but it is not a page of the site.
+            if result.status_code == 200:
+                page, findings = self._parse_and_check(result, base, soup,
+                                                       all_links)
         row = {
             "url": url,
             "final_url": result.final_url,
@@ -193,13 +270,56 @@ class _Crawler:
             "error": result.error,
             "redirect_loop": result.redirect_loop,
         }
-        return row, links
+        return row, links, page, findings
+
+    def _parse_and_check(self, result, base: str, soup, all_links: List[str]):
+        """Extract this page's fields, read its JSON-LD, and judge both."""
+        schema = parse_schema(soup)
+        fields = parse_page(soup, base, all_links, self.config.host,
+                            self.config.include_subdomains, result.headers)
+        findings = check_page(fields, schema, base)
+        page = {
+            "title": fields.title,
+            "title_length": fields.title_length,
+            "meta_description": fields.meta_description,
+            "meta_description_length": fields.meta_description_length,
+            "meta_robots": fields.meta_robots,
+            "x_robots_tag": fields.x_robots_tag,
+            "canonical": fields.canonical,
+            "canonical_is_self": (fields.canonical == base
+                                  if fields.canonical else None),
+            "hreflang_count": len(fields.hreflang),
+            "hreflang": ";".join(f"{lang}={href}"
+                                 for lang, href in fields.hreflang),
+            "viewport": fields.viewport,
+            "html_lang": fields.html_lang,
+            "h1_count": fields.h1_count,
+            "h1": " | ".join(fields.h1[:3]),
+            "h2_count": fields.h2_count,
+            "h3_count": fields.h3_count,
+            "word_count": fields.word_count,
+            "image_count": fields.image_count,
+            "images_missing_alt": fields.images_missing_alt,
+            "images_empty_alt": fields.images_empty_alt,
+            "internal_links": fields.internal_links,
+            "external_links": fields.external_links,
+            "nofollow_internal_links": fields.nofollow_internal_links,
+            "mixed_content_count": len(fields.mixed_content),
+            "schema_types": ";".join(schema.types),
+            "schema_block_count": schema.block_count,
+            "schema_invalid_count": schema.invalid_count,
+            # Underscored keys never reach the CSV; the writer drops them.
+            "_schema_types": schema.types,
+            "_noindex": fields.is_noindex,
+            "_hreflang": fields.hreflang,
+        }
+        return page, findings
 
     def run_batch(self, tasks: List[Tuple], executor: ThreadPoolExecutor):
         """Fetch a chunk in parallel, then fold the results in order."""
         out = []
-        for row, links in executor.map(self._work, tasks):
-            self.record(row, links)
+        for row, links, page, findings in executor.map(self._work, tasks):
+            self.record(row, links, page, findings)
             out.append((row, links))
         return out
 
@@ -235,6 +355,9 @@ def run_crawl(config: AuditConfig, out_dir: Optional[str] = None,
     home_row = None
     home_html: Optional[str] = None
     home_links: List[str] = []
+    home_page = None
+    home_findings: List = []
+    home_headers: Dict[str, str] = {}
     if start_url and (not config.respect_robots or robots.is_allowed(start_url)):
         home = fetcher.fetch(start_url)
         home_final = home.final_url
@@ -260,19 +383,28 @@ def run_crawl(config: AuditConfig, out_dir: Optional[str] = None,
             "error": home.error,
             "redirect_loop": home.redirect_loop,
         }
+        home_headers = dict(home.headers)
         if home.html:
             base = home.final_url or start_url
+            soup = make_soup(home.html)
+            all_links = extract_links(soup, base)
             home_links = [
-                href for href in extract_links(home.html, base)
+                href for href in all_links
                 if is_same_site(href, config.host, config.include_subdomains)
             ]
+            if home.status_code == 200:
+                home_page, home_findings = _parse_page_fields(
+                    home, base, soup, all_links, config)
             home_html = home.html
+            del soup  # the homepage tree does not outlive the preflight
         del home  # release the response before the crawl proper
 
     # --- the run folder can only be named now that the host is settled ---
     out_dir = out_dir or default_out_dir(config.host)
     paths = {
         "raw_crawl_csv": f"{out_dir}/raw_crawl.csv",
+        "audit_pages_csv": f"{out_dir}/audit_pages.csv",
+        "page_issues_csv": f"{out_dir}/page_issues.csv",
         "crawl_issues_csv": f"{out_dir}/crawl_issues.csv",
         "sitemap_sweep_csv": f"{out_dir}/sitemap_sweep.csv",
         "crawl_summary_json": f"{out_dir}/crawl_summary.json",
@@ -280,7 +412,9 @@ def run_crawl(config: AuditConfig, out_dir: Optional[str] = None,
     outcome.paths = paths
 
     issues = IssueLog(paths["crawl_issues_csv"])
+    page_issues = PageIssueLog(paths["page_issues_csv"])
     rows = StreamingCsv(paths["raw_crawl_csv"], CSV_COLUMNS)
+    pages_csv = StreamingCsv(paths["audit_pages_csv"], AUDIT_PAGE_COLUMNS)
     sweep_csv = StreamingCsv(paths["sitemap_sweep_csv"], SWEEP_COLUMNS)
     html_store = HtmlStore(out_dir, config.keep_html)
     if home_row is not None:
@@ -292,7 +426,8 @@ def run_crawl(config: AuditConfig, out_dir: Optional[str] = None,
         for issue in pending_issues:
             issues.add(*issue)
 
-        crawler = _Crawler(config, fetcher, issues, rows, html_store, outcome)
+        crawler = _Crawler(config, fetcher, issues, rows, html_store, outcome,
+                           pages=pages_csv, page_issues=page_issues)
         crawler.robots = robots
 
         # --- sitemaps, now resolved against the adopted host ---
@@ -319,7 +454,7 @@ def run_crawl(config: AuditConfig, out_dir: Optional[str] = None,
             # Phase 1: the link graph, one depth at a time.
             level: List[Tuple] = []
             if home_row is not None:
-                crawler.record(home_row, home_links)
+                crawler.record(home_row, home_links, home_page, home_findings)
                 for href in home_links:
                     crawler.link_discovered.add(href)
                     if href not in crawler.handled:
@@ -368,13 +503,21 @@ def run_crawl(config: AuditConfig, out_dir: Optional[str] = None,
             # Phase 3: sweep every sitemap URL the crawl did not fetch.
             _sweep(crawler, sitemap_urls, sweep_csv, executor, chunk_size)
 
+        # --- after the crawl: checks that need more than one page ---
+        _run_cross_page_checks(crawler, page_issues)
+        _run_site_level_checks(crawler, page_issues, home_row, home_headers)
+
         outcome.html_files_kept = html_store.files_written
         outcome.issue_counts = issues.counts()
+        outcome.page_issue_counts = page_issues.counts()
+        outcome.page_issue_severity = page_issues.severity_counts()
         outcome.duration_seconds = round(time.perf_counter() - started, 2)
     finally:
         rows.close()
+        pages_csv.close()
         sweep_csv.close()
         issues.close()
+        page_issues.close()
         if own_fetcher:
             fetcher.close()
 
@@ -402,12 +545,27 @@ def _sweep(crawler: _Crawler, sitemap_urls: List[str], sweep_csv: StreamingCsv,
     still audited in full rather than sampled. No HTML is fetched or stored.
     """
     outcome = crawler.outcome
+    outcome.sitemap_urls_total = len(sitemap_urls)
     todo = []
     for url in sitemap_urls:
         if url in crawler.handled:
             outcome.sweep_already_crawled += 1
             continue
         todo.append(url)
+
+    limit = crawler.config.sweep_limit
+    if len(todo) > limit:
+        # A 40,000-URL sitemap would otherwise run for hours. Say so rather
+        # than quietly checking a prefix.
+        outcome.sweep_capped = True
+        crawler.issues.add(
+            "sitemap_sweep_capped", crawler.config.domain, None,
+            f"{len(todo)} sitemap URLs to sweep, capped at {limit}")
+        todo = todo[:limit]
+
+    # HEAD is cheap next to a page fetch, so the sweep gets its own delay.
+    page_delay = crawler.fetcher.delay
+    crawler.fetcher.set_delay(crawler.config.sweep_delay)
 
     def check(url: str) -> Dict:
         blocked = (crawler.config.respect_robots and crawler.robots is not None
@@ -461,8 +619,93 @@ def _sweep(crawler: _Crawler, sitemap_urls: List[str], sweep_csv: StreamingCsv,
             if not row["in_crawl"]:
                 crawler.issues.add("sitemap_only_page", url, None,
                                    "no internal link points here")
+    crawler.fetcher.set_delay(page_delay)
 
 
 def default_out_dir(host: str) -> str:
     """output/<adopted host>/<timestamp>/ -- one folder per run."""
     return os.path.join("output", host, time.strftime("%Y%m%d-%H%M%S"))
+
+
+def _parse_page_fields(result, base: str, soup, all_links: List[str],
+                       config: AuditConfig):
+    """Parse and check one page outside a _Crawler, for the preflight homepage.
+
+    The homepage is fetched before the run folder has a name, so it cannot go
+    through the worker path; it must not go unparsed either.
+    """
+    schema = parse_schema(soup)
+    fields = parse_page(soup, base, all_links, config.host,
+                        config.include_subdomains, result.headers)
+    findings = check_page(fields, schema, base)
+    page = {
+        "title": fields.title,
+        "title_length": fields.title_length,
+        "meta_description": fields.meta_description,
+        "meta_description_length": fields.meta_description_length,
+        "meta_robots": fields.meta_robots,
+        "x_robots_tag": fields.x_robots_tag,
+        "canonical": fields.canonical,
+        "canonical_is_self": (fields.canonical == base
+                              if fields.canonical else None),
+        "hreflang_count": len(fields.hreflang),
+        "hreflang": ";".join(f"{lang}={href}" for lang, href in fields.hreflang),
+        "viewport": fields.viewport,
+        "html_lang": fields.html_lang,
+        "h1_count": fields.h1_count,
+        "h1": " | ".join(fields.h1[:3]),
+        "h2_count": fields.h2_count,
+        "h3_count": fields.h3_count,
+        "word_count": fields.word_count,
+        "image_count": fields.image_count,
+        "images_missing_alt": fields.images_missing_alt,
+        "images_empty_alt": fields.images_empty_alt,
+        "internal_links": fields.internal_links,
+        "external_links": fields.external_links,
+        "nofollow_internal_links": fields.nofollow_internal_links,
+        "mixed_content_count": len(fields.mixed_content),
+        "schema_types": ";".join(schema.types),
+        "schema_block_count": schema.block_count,
+        "schema_invalid_count": schema.invalid_count,
+        "_schema_types": schema.types,
+        "_noindex": fields.is_noindex,
+        "_hreflang": fields.hreflang,
+    }
+    return page, findings
+
+
+def _run_cross_page_checks(crawler: _Crawler,
+                           page_issues: PageIssueLog) -> None:
+    """Checks over the pages already crawled. Never re-fetches a known URL."""
+    checked = {"count": 0}
+
+    def head_check(url: str) -> Optional[int]:
+        """Only ever called for a canonical target the crawl never saw."""
+        checked["count"] += 1
+        result = crawler.fetcher.head(url)
+        return result.status_code
+
+    for issue_type, url, final_url, detail in check_cross_page(
+            crawler.index, head_check=head_check,
+            canonical_check_limit=crawler.config.canonical_check_limit):
+        page_issues.add(issue_type, url, final_url, detail)
+
+
+def _run_site_level_checks(crawler: _Crawler, page_issues: PageIssueLog,
+                           home_row: Optional[Dict],
+                           home_headers: Dict[str, str]) -> None:
+    """Transport and header checks, recorded once against the homepage row."""
+    if home_row is None:
+        return
+    http_ok: Optional[bool] = None
+    http_url = "http://" + crawler.config.host + "/"
+    result = crawler.fetcher.head(http_url)
+    if result.status_code is not None:
+        http_ok = bool(result.final_url
+                       and result.final_url.startswith("https://"))
+
+    findings = check_site_level(home_headers, http_ok)
+    final_url = home_row.get("final_url") or home_row["url"]
+    for issue_type, detail in findings:
+        page_issues.add(issue_type, home_row["url"], final_url, detail,
+                        site_level=True)

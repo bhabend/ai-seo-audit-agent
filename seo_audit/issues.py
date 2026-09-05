@@ -58,11 +58,17 @@ CRAWLER_EFFECT: Dict[str, str] = {
     "fetch_error":
         "The crawler gets nothing back, so the page cannot be indexed.",
     "non_html_linked":
-        "The URL is linked as if it were a page but returns a file, so it is "
-        "not indexed as a page.",
+        "The URL is linked as if it were a page but returns something that is "
+        "neither a page nor an indexable document.",
+    "document_linked":
+        "A PDF or Office file linked as a page. Search engines index these on "
+        "their own terms, so it is worth knowing about, not a fault.",
     "render_suspect":
         "Almost no text arrives in the HTML, so a crawler that does not run "
         "JavaScript sees a nearly empty page.",
+    "sitemap_sweep_capped":
+        "The sitemap is larger than the sweep limit, so the URLs past the cap "
+        "were never status-checked and their state is unknown.",
     "ai_crawler_rule":
         "This robots.txt group decides whether AI assistants and their "
         "crawlers may read the site's content.",
@@ -72,8 +78,59 @@ ISSUE_COLUMNS = ["issue_type", "url", "referrer", "detail", "crawler_effect"]
 
 # Thresholds the crawl layer judges against.
 DEEP_PAGE_DEPTH = 3
+# A document is a big file over a slow pipe; a page is not. Judging both at
+# 3 seconds reported every large PDF as a site defect.
 SLOW_RESPONSE_MS = 3000
+SLOW_DOCUMENT_MS = 10000
 RENDER_SUSPECT_CHARS = 500
+
+# Page-level checks, each with the severity it is reported at. Separate from
+# CRAWLER_EFFECT above: those are obstacles a crawler meets on the way in,
+# these are faults in a page that was fetched successfully.
+PAGE_ISSUE_SEVERITY: Dict[str, str] = {
+    # per page
+    "title_missing": "high",
+    "title_too_long": "low",
+    "title_too_short": "low",
+    "meta_description_missing": "medium",
+    "meta_description_too_long": "low",
+    "h1_missing": "medium",
+    "h1_multiple": "low",
+    "noindex_page": "high",
+    "nofollow_page": "medium",
+    "canonical_missing": "medium",
+    "canonical_off_page": "medium",
+    "canonical_not_absolute": "low",
+    "viewport_missing": "medium",
+    "html_lang_missing": "low",
+    "images_missing_alt": "low",
+    "thin_page": "medium",
+    "mixed_content": "high",
+    "schema_missing": "low",
+    "schema_invalid_json": "medium",
+    "schema_missing_property": "low",
+    # cross page
+    "canonical_target_not_crawled": "medium",
+    "canonical_target_unchecked": "low",
+    "canonical_target_non_200": "high",
+    "canonical_chain": "medium",
+    "canonical_target_noindex": "high",
+    "hreflang_not_reciprocal": "medium",
+    "hreflang_target_non_200": "medium",
+    "duplicate_title": "medium",
+    "duplicate_meta_description": "low",
+    "sitemap_noindex": "high",
+    "sitemap_off_canonical": "medium",
+    # site level, recorded once on the homepage row
+    "http_to_https_redirect": "high",
+    "hsts_missing": "medium",
+    "x_content_type_options_missing": "low",
+    "x_frame_options_missing": "low",
+    "csp_missing": "low",
+}
+
+PAGE_ISSUE_COLUMNS = ["issue_type", "severity", "url", "final_url", "detail",
+                      "site_level"]
 
 # Robots user-agent tokens worth reporting when a site names them.
 AI_CRAWLER_TOKENS = (
@@ -197,3 +254,80 @@ def ai_crawler_groups(robots_text: str):
             current_rules.append(f"{_DIRECTIVE_CASING[name]}: {value}")
     flush()
     return groups
+
+
+class PageIssueLog:
+    """Streams page-level findings to CSV, counting by type and by severity.
+
+    Same contract as IssueLog: unknown types raise rather than inventing a
+    category, and every write takes the lock because crawl workers call it.
+    """
+
+    def __init__(self, path: Optional[str] = None):
+        self.path = path
+        self._counts: Counter = Counter()
+        self._severity_counts: Counter = Counter()
+        self._lock = threading.Lock()
+        self._handle = None
+        self._writer = None
+        if path:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            self._handle = open(path, "w", newline="", encoding="utf-8-sig")
+            self._writer = csv.DictWriter(self._handle,
+                                          fieldnames=PAGE_ISSUE_COLUMNS)
+            self._writer.writeheader()
+            self._handle.flush()
+
+    def add(self, issue_type: str, url: str, final_url: Optional[str] = None,
+            detail: str = "", site_level: bool = False) -> None:
+        severity = PAGE_ISSUE_SEVERITY.get(issue_type)
+        if severity is None:
+            raise KeyError(f"unknown page issue type {issue_type!r}")
+        with self._lock:
+            self._counts[issue_type] += 1
+            self._severity_counts[severity] += 1
+            if self._writer is not None:
+                self._writer.writerow({
+                    "issue_type": issue_type,
+                    "severity": severity,
+                    "url": url,
+                    "final_url": final_url or "",
+                    "detail": detail,
+                    "site_level": site_level,
+                })
+                # Flushed per row so a crash keeps everything already found.
+                self._handle.flush()
+
+    def add_many(self, findings, url: str, final_url: Optional[str] = None,
+                 site_level: bool = False) -> int:
+        """Record a list of (issue_type, detail) pairs for one page."""
+        for issue_type, detail in findings:
+            self.add(issue_type, url, final_url, detail, site_level)
+        return len(findings)
+
+    def counts(self) -> Dict[str, int]:
+        with self._lock:
+            return dict(sorted(self._counts.items()))
+
+    def severity_counts(self) -> Dict[str, int]:
+        with self._lock:
+            return {level: self._severity_counts[level]
+                    for level in ("high", "medium", "low")
+                    if self._severity_counts[level]}
+
+    def total(self) -> int:
+        with self._lock:
+            return sum(self._counts.values())
+
+    def close(self) -> None:
+        with self._lock:
+            if self._handle is not None:
+                self._handle.close()
+                self._handle = None
+                self._writer = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()

@@ -42,6 +42,13 @@ def register_site(mock, pages, robots=None, sitemaps=None):
     `pages` maps absolute URL -> html string (or a dict of kwargs for the mock).
     robots.txt and the conventional sitemap paths 404 unless supplied.
     """
+    # The site-level check asks whether plain http redirects to https.
+    # Registered first so a test's own `extra` can override it.
+    mock.head("http://example.com/", status_code=301,
+              headers={"Location": BASE + "/"})
+    mock.get("http://example.com/", status_code=301,
+             headers={"Location": BASE + "/"})
+
     mock.get(f"{BASE}/robots.txt",
              text=robots if robots is not None else "",
              status_code=200 if robots is not None else 404)
@@ -82,6 +89,8 @@ class Run:
         self.rows = read_rows(outcome.paths["raw_crawl_csv"])
         self.issues = read_rows(outcome.paths["crawl_issues_csv"])
         self.sweep = read_rows(outcome.paths["sitemap_sweep_csv"])
+        self.pages = read_rows(outcome.paths["audit_pages_csv"])
+        self.page_issues = read_rows(outcome.paths["page_issues_csv"])
         with open(outcome.paths["crawl_summary_json"], encoding="utf-8") as fh:
             self.summary = json.load(fh)
 
@@ -93,6 +102,16 @@ class Run:
 
     def issue_types(self):
         return {i["issue_type"] for i in self.issues}
+
+    def pages_by_url(self):
+        """Audit rows keyed on final_url: the page that answered."""
+        return {p["final_url"]: p for p in self.pages}
+
+    def page_issues_of(self, issue_type):
+        return [i for i in self.page_issues if i["issue_type"] == issue_type]
+
+    def page_issue_types(self):
+        return {i["issue_type"] for i in self.page_issues}
 
     def has_dir(self, name):
         return os.path.isdir(os.path.join(self.out_dir, name))

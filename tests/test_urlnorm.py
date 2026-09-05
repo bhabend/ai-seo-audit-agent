@@ -1,6 +1,7 @@
 """URL normalisation and same-site tests (lesson 4 from the v0 review)."""
 
-from seo_audit.urlnorm import extract_links, is_same_site, normalize
+from seo_audit.urlnorm import (extract_links, is_same_site, make_soup,
+                               normalize)
 
 
 def test_fragment_is_stripped():
@@ -73,7 +74,8 @@ def test_extract_links_handles_relative_absolute_and_skips_non_http():
       <a href="#top">h</a>
       <a href="/about#faq">i</a>
     """
-    links = list(extract_links(html, "https://example.com/docs/"))
+    # extract_links now takes the shared soup, not raw HTML.
+    links = list(extract_links(make_soup(html), "https://example.com/docs/"))
     assert links == [
         "https://example.com/about",
         "https://example.com/docs/contact/",

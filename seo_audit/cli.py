@@ -35,6 +35,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sitemap-reserve", type=float, default=0.25,
                         help="Share of the page budget held back for sitemap "
                              "URLs no link reached, 0 to 0.5 (default 0.25).")
+    parser.add_argument("--sweep-limit", type=int, default=10000,
+                        help="Most sitemap URLs the sweep will status-check "
+                             "(default 10000). Beyond this the sweep stops "
+                             "and the summary says it was capped.")
+    parser.add_argument("--sweep-delay", type=float, default=0.25,
+                        help="Per-worker delay for sweep requests only "
+                             "(default 0.25). HEAD is cheap; pages are not.")
+    parser.add_argument("--canonical-check-limit", type=int, default=200,
+                        help="Most canonical targets outside the crawl that "
+                             "will be checked with HEAD (default 200). The "
+                             "rest are reported as unchecked.")
     parser.add_argument("--timeout", type=int, default=20)
     parser.add_argument("--no-robots", action="store_true",
                         help="Do not fetch or obey robots.txt.")
@@ -59,6 +70,9 @@ def main(argv=None) -> int:
         workers=args.workers,
         crawl_delay=args.delay,
         sitemap_reserve=args.sitemap_reserve,
+        sweep_limit=args.sweep_limit,
+        sweep_delay=args.sweep_delay,
+        canonical_check_limit=args.canonical_check_limit,
         timeout=args.timeout,
         respect_robots=not args.no_robots,
         include_subdomains=args.include_subdomains,
@@ -73,6 +87,8 @@ def main(argv=None) -> int:
     print(json.dumps(build_summary(outcome), indent=2, ensure_ascii=False))
 
     for label, key in (("raw crawl    ", "raw_crawl_csv"),
+                       ("audit pages  ", "audit_pages_csv"),
+                       ("page issues  ", "page_issues_csv"),
                        ("sitemap sweep", "sitemap_sweep_csv"),
                        ("crawl issues ", "crawl_issues_csv"),
                        ("summary      ", "crawl_summary_json")):

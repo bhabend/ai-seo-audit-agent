@@ -28,6 +28,9 @@ class AuditConfig:
     workers: int = 4
     sitemap_reserve: float = 0.25
     keep_html: bool = False
+    sweep_limit: int = 10000
+    sweep_delay: float = 0.25
+    canonical_check_limit: int = 200
     user_agent: str = DEFAULT_USER_AGENT
     respect_robots: bool = True
     include_subdomains: bool = False
@@ -49,6 +52,12 @@ class AuditConfig:
                 f"{self.sitemap_reserve}")
         if self.workers < 1:
             raise ValueError(f"workers must be at least 1, got {self.workers}")
+        if self.sweep_limit < 0:
+            raise ValueError(
+                f"sweep_limit must not be negative, got {self.sweep_limit}")
+        if self.canonical_check_limit < 0:
+            raise ValueError("canonical_check_limit must not be negative, got "
+                             f"{self.canonical_check_limit}")
 
         raw = self.domain.strip()
         if "://" not in raw:

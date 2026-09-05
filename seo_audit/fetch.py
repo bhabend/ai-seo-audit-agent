@@ -15,7 +15,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
 
@@ -47,10 +47,20 @@ class FetchResult:
     error: Optional[str] = None
     content: Optional[bytes] = None
     redirect_loop: bool = False
+    headers: Dict[str, str] = field(default_factory=dict)
 
     @property
     def redirect_hops(self) -> int:
         return len(self.redirect_chain)
+
+    def header(self, name: str) -> Optional[str]:
+        """Case-insensitive response header lookup (HTTP headers are not case
+        sensitive, and servers disagree about how to spell X-Robots-Tag)."""
+        wanted = name.lower()
+        for key, value in self.headers.items():
+            if key.lower() == wanted:
+                return value
+        return None
 
     @property
     def is_html(self) -> bool:
@@ -228,6 +238,7 @@ class Fetcher:
         result.final_url = normalize(response.url) or response.url
         result.redirect_chain = [(h.url, h.status_code) for h in response.history]
         result.content_type = response.headers.get("Content-Type")
+        result.headers = dict(response.headers)
 
         if not is_html_content_type(result.content_type):
             # Non-HTML (pdf, image, xml): status recorded, body not parsed.
@@ -270,6 +281,7 @@ class Fetcher:
         result.final_url = normalize(response.url) or response.url
         result.redirect_chain = [(h.url, h.status_code) for h in response.history]
         result.content_type = response.headers.get("Content-Type")
+        result.headers = dict(response.headers)
         return result
 
     def fetch_bytes(self, url: str) -> Tuple[Optional[int], Optional[bytes],

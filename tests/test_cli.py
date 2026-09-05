@@ -15,6 +15,9 @@ def test_flags_reach_the_parser():
     assert args.workers == 4
     assert args.sitemap_reserve == 0.25
     assert args.keep_html is False
+    assert args.sweep_limit == 10000
+    assert args.sweep_delay == 0.25
+    assert args.canonical_check_limit == 200
 
 
 def test_cli_writes_every_artefact_and_prints_the_summary(tmp_path, capsys):
@@ -28,8 +31,8 @@ def test_cli_writes_every_artefact_and_prints_the_summary(tmp_path, capsys):
 
     assert code == 0
     assert sorted(os.listdir(str(tmp_path))) == [
-        "crawl_issues.csv", "crawl_summary.json", "raw_crawl.csv",
-        "sitemap_sweep.csv"]
+        "audit_pages.csv", "crawl_issues.csv", "crawl_summary.json",
+        "page_issues.csv", "raw_crawl.csv", "sitemap_sweep.csv"]
 
     summary = json.loads(capsys.readouterr().out)
     assert summary["pages_found"] == 2

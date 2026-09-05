@@ -41,6 +41,43 @@ SWEEP_COLUMNS = [
     "error",
 ]
 
+AUDIT_PAGE_COLUMNS = [
+    "url",
+    "final_url",
+    "status_code",
+    "title",
+    "title_length",
+    "meta_description",
+    "meta_description_length",
+    "meta_robots",
+    "x_robots_tag",
+    "canonical",
+    "canonical_is_self",
+    "hreflang_count",
+    "hreflang",
+    "viewport",
+    "html_lang",
+    "h1_count",
+    "h1",
+    "h2_count",
+    "h3_count",
+    "word_count",
+    "image_count",
+    "images_missing_alt",
+    "images_empty_alt",
+    "internal_links",
+    "external_links",
+    "nofollow_internal_links",
+    "mixed_content_count",
+    "schema_types",
+    "schema_block_count",
+    "schema_invalid_count",
+    "in_sitemap",
+    "depth",
+    "issue_count",
+    "issues",
+]
+
 # Below this many visible characters a page is almost certainly a JS shell.
 RENDER_SUSPECT_THRESHOLD = 500
 
@@ -86,6 +123,8 @@ class CrawlStats:
 
     def __init__(self) -> None:
         self.pages = 0
+        self.pages_parsed = 0
+        self.schema_type_counts: Counter = Counter()
         self.status_counts: Counter = Counter()
         self.depth_counts: Counter = Counter()
         self.errors = 0
@@ -193,9 +232,19 @@ def build_summary(outcome) -> Dict[str, Any]:
             if stats.pages else 0.0,
             "examples": stats.render_examples,
         },
+        "pages_parsed": stats.pages_parsed,
+        "page_issue_counts": outcome.page_issue_counts,
+        "page_issue_severity": outcome.page_issue_severity,
+        "page_issues_total": sum(outcome.page_issue_counts.values()),
+        "schema_type_counts": dict(sorted(
+            stats.schema_type_counts.items(),
+            key=lambda kv: (-kv[1], kv[0]))),
         "robots": {
             "found": bool(robots and robots.found),
             "url": robots.url if robots else None,
+            # robots.txt is read before the homepage tells us which host the
+            # site really serves, so this may be the pre-adoption hostname.
+            "fetched_from_host": outcome.config.configured_host,
             "status_code": robots.status_code if robots else None,
             "disallow_rules": len(robots.disallow) if robots else 0,
             "crawl_delay_declared": robots.crawl_delay if robots else None,
@@ -212,6 +261,10 @@ def build_summary(outcome) -> Dict[str, Any]:
             "urls_in_sitemap": len(sitemap.urls) if sitemap else 0,
         },
         "sitemap_sweep": {
+            "sitemap_urls_total": outcome.sitemap_urls_total,
+            "sitemap_urls_swept": outcome.sweep_checked,
+            "sweep_capped": outcome.sweep_capped,
+            "sweep_limit": config.sweep_limit,
             "checked": outcome.sweep_checked,
             "already_crawled": outcome.sweep_already_crawled,
             "blocked_by_robots": outcome.sweep_blocked,

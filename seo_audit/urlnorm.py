@@ -8,7 +8,7 @@ here goes through urlparse/urljoin instead of substring matching.
 from __future__ import annotations
 
 import posixpath
-from typing import Iterable, Optional
+from typing import List, Optional
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 # Params that never change the page served, only the analytics attached to it.
@@ -175,11 +175,23 @@ def is_slash_variant(a: str, b: str) -> bool:
     return bool(a and b and slash_variant(a) == b)
 
 
-def extract_links(html: str, base_url: str) -> Iterable[str]:
-    """Absolute, normalised hrefs from every <a> in `html` (order preserved)."""
+def make_soup(html: str):
+    """The one BeautifulSoup pass a page gets.
+
+    Link extraction, field parsing and JSON-LD all read this same tree, so a
+    page is never parsed twice.
+    """
     from bs4 import BeautifulSoup
 
-    soup = BeautifulSoup(html, "lxml")
+    return BeautifulSoup(html, "lxml")
+
+
+def extract_links(soup, base_url: str) -> List[str]:
+    """Absolute, normalised hrefs from every <a> in `soup` (order preserved).
+
+    Takes an already-built soup rather than raw HTML so the caller controls
+    how many times a page is parsed.
+    """
     seen = set()
     out = []
     for anchor in soup.find_all("a", href=True):

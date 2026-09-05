@@ -47,6 +47,8 @@ def test_sweep_covers_sitemap_urls_the_page_crawl_could_not_reach(tmp_path):
     assert len(run.sweep) == run.summary["sitemap_sweep"]["checked"]
     assert (run.summary["sitemap_sweep"]["checked"]
             + run.summary["sitemap_sweep"]["already_crawled"]) == len(sitemap_urls)
+    assert run.summary["sitemap_sweep"]["sitemap_urls_total"] == len(sitemap_urls)
+    assert run.summary["sitemap_sweep"]["sweep_capped"] is False
 
 
 def test_blocked_sitemap_url_is_swept_but_never_fetched(tmp_path):
@@ -127,3 +129,60 @@ def test_sweep_never_stores_html(tmp_path):
     assert set(run.sweep[0].keys()) == {
         "url", "status_code", "final_url", "redirect_hops",
         "blocked_by_robots", "in_crawl", "error"}
+
+
+# --- A1: the sweep is capped and has its own delay --------------------------
+
+def test_sweep_limit_caps_the_check_and_says_so(tmp_path):
+    urls = "".join(f"<url><loc>{BASE}/s{i}</loc></url>" for i in range(8))
+    pages = {BASE + "/": html_page([])}
+    for i in range(8):
+        pages[BASE + f"/s{i}"] = html_page([])
+
+    run = crawl_site(
+        tmp_path, pages,
+        sitemaps={BASE + "/sitemap.xml": f'<?xml version="1.0"?><urlset>{urls}</urlset>'},
+        max_pages=1, sweep_limit=3,
+    )
+
+    assert len(run.sweep) == 3
+    assert run.summary["sitemap_sweep"]["sweep_capped"] is True
+    assert run.summary["sitemap_sweep"]["sitemap_urls_swept"] == 3
+    assert run.summary["sitemap_sweep"]["sitemap_urls_total"] == 8
+    capped = run.issues_of("sitemap_sweep_capped")
+    assert len(capped) == 1
+    assert "capped at 3" in capped[0]["detail"]
+
+
+def test_sweep_delay_applies_to_the_sweep_and_is_handed_back(tmp_path):
+    """Page fetches keep the crawl delay; only the sweep uses --sweep-delay."""
+    seen = []
+
+    class RecordingFetcher:
+        pass
+
+    import seo_audit.crawl as crawl_module
+
+    original = crawl_module.Fetcher.set_delay
+
+    def spy(self, delay):
+        seen.append(delay)
+        return original(self, delay)
+
+    crawl_module.Fetcher.set_delay = spy
+    try:
+        crawl_site(
+            tmp_path,
+            {BASE + "/": html_page([]), BASE + "/s0": html_page([])},
+            sitemaps={BASE + "/sitemap.xml":
+                      f'<?xml version="1.0"?><urlset>'
+                      f'<url><loc>{BASE}/s0</loc></url></urlset>'},
+            max_pages=1, crawl_delay=0.0, sweep_delay=0.25,
+        )
+    finally:
+        crawl_module.Fetcher.set_delay = original
+
+    # crawl delay set first, then the sweep delay, then the crawl delay back.
+    assert seen[0] == 0.0
+    assert 0.25 in seen
+    assert seen[-1] == 0.0
