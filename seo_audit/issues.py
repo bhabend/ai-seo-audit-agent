@@ -138,8 +138,10 @@ PAGE_ISSUE_SEVERITY: Dict[str, str] = {
     "lcp_poor": "medium",
     "cls_poor": "medium",
     "inp_poor": "medium",
-    "performance_no_field_data": "info",
-    "pagespeed_error": "info",
+    # Not "info": these mean the measurement did not happen, which is a
+    # different statement from "we looked and there is nothing to report".
+    "performance_no_field_data": "unmeasured",
+    "pagespeed_error": "unmeasured",
     # site level, recorded once on the homepage row
     "http_to_https_redirect": "high",
     "hsts_missing": "medium",
@@ -331,7 +333,8 @@ class PageIssueLog:
     def severity_counts(self) -> Dict[str, int]:
         with self._lock:
             return {level: self._severity_counts[level]
-                    for level in ("high", "medium", "low", "info")
+                    for level in ("high", "medium", "low", "info",
+                                  "unmeasured")
                     if self._severity_counts[level]}
 
     def total(self) -> int:

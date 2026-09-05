@@ -4,8 +4,10 @@
     "A page starts at 100. Each issue subtracts its points from its bucket;",
     "each bucket floors at 0 so one bad area cannot sink the whole score.",
     "The page score is the sum of the six buckets.",
-    "scope 'page' means the issue is a fault of that page; 'once' means it is",
-    "a group or site finding attached to one representative page.",
+    "scope 'page' means the issue is a fault of that page; 'once' means a group",
+    "finding attached to one representative page; 'site' means a site-wide",
+    "fault that deducts from site_score directly, capped in total, rather than",
+    "from whichever page happened to carry the row.",
     "Crawl-layer types have bucket null: they describe the crawl, not a page."
   ],
   "buckets": {
@@ -70,7 +72,7 @@
     "csp_missing": {
       "bucket": "technical",
       "points": 2,
-      "scope": "once"
+      "scope": "site"
     },
     "duplicate_content": {
       "bucket": "content",
@@ -120,7 +122,7 @@
     "hsts_missing": {
       "bucket": "technical",
       "points": 4,
-      "scope": "once"
+      "scope": "site"
     },
     "html_lang_missing": {
       "bucket": "technical",
@@ -130,7 +132,7 @@
     "http_to_https_redirect": {
       "bucket": "indexability",
       "points": 15,
-      "scope": "once"
+      "scope": "site"
     },
     "images_missing_alt": {
       "bucket": "on_page",
@@ -189,7 +191,7 @@
     },
     "orphan_page": {
       "bucket": "links",
-      "points": 8,
+      "points": 5,
       "scope": "page"
     },
     "pagespeed_error": {
@@ -244,7 +246,7 @@
     },
     "thin_page": {
       "bucket": "content",
-      "points": 10,
+      "points": 6,
       "scope": "page"
     },
     "title_missing": {
@@ -270,12 +272,12 @@
     "x_content_type_options_missing": {
       "bucket": "technical",
       "points": 2,
-      "scope": "once"
+      "scope": "site"
     },
     "x_frame_options_missing": {
       "bucket": "technical",
       "points": 2,
-      "scope": "once"
+      "scope": "site"
     }
   },
   "crawl_issues": {

@@ -149,6 +149,7 @@ def test_site_score_without_pagespeed_is_the_mean_page_score():
 
 
 def test_site_score_with_pagespeed_mixes_in_the_mobile_mean():
+    # Both sampled URLs measured, so coverage is 100% and the gate opens.
     result = board_of(80, 60, 40).site_score([50, 30])
     expected = round(0.85 * 60 + PERFORMANCE_WEIGHT * 40)
     assert result.performance_score == 40
@@ -159,7 +160,12 @@ def test_site_score_with_pagespeed_mixes_in_the_mobile_mean():
 
 def test_missing_scores_in_the_sample_are_ignored_not_counted_as_zero():
     result = board_of(80, 80).site_score([60, None, None])
+    # The mean is over what was measured, never over zeros...
     assert result.performance_score == 60
+    # ...but one of three is under the coverage gate, so it is reported and
+    # not folded into the site score.
+    assert result.performance_included is False
+    assert result.site_score == 80
 
 
 def test_an_all_error_pagespeed_sample_falls_back_cleanly():

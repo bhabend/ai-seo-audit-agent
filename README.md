@@ -90,8 +90,12 @@ later. All four files are UTF-8 with a BOM, so Excel opens them cleanly.
 - **`raw_crawl.csv`**: one row per fetched URL: `url`, `final_url`,
   `status_code`, `redirect_hops`, `response_time_ms`, `content_type`,
   `in_sitemap`, `in_crawl`, `depth`, `discovered_from`, `text_chars`,
-  `error`. `final_url` is normalised the same way as `url`, so the two
-  columns join.
+  `error`, `redirect_duplicate`. `final_url` is normalised the same way as
+  `url`, so the two columns join. `redirect_duplicate` marks a URL that
+  redirected to a page another URL had already reached: the redirect is
+  still recorded as a finding, but the page behind it is parsed and scored
+  exactly once. `audit_pages.csv` therefore has one row per distinct
+  `final_url`, and `pages_parsed` counts distinct pages.
 - **`sitemap_sweep.csv`**: one row per sitemap URL the crawl did not fetch:
   `url`, `status_code`, `final_url`, `redirect_hops`, `blocked_by_robots`,
   `in_crawl`, `error`.
@@ -184,11 +188,19 @@ each group is measured as its representative. That is what lets the audit say
 "the product template, 212 pages, scores 34 on mobile" instead of "one page
 scored 34".
 
-The cost ceiling is structural: **2 calls per sampled URL** (mobile and
-desktop), on the homepage plus `--pagespeed-templates` groups. At the default
-of 15 that is **at most 32 calls per run**, and no site shape can exceed it.
-A 429 or 5xx is retried once after 10 seconds; a second failure becomes a
-`pagespeed_error` row rather than a crash.
+The cost ceiling is structural and **enforced in code**, not merely intended:
+each measurement gets at most 2 attempts, so the ceiling is
+`2 x (templates + 1) x 2 strategies` — **64 attempts at the default of 15
+templates**, for 32 measurements. The summary reports `pagespeed_attempts`,
+`pagespeed_attempts_ceiling` and `pagespeed_calls` (attempts that returned a
+usable result) separately, because an attempt that timed out is not a
+measurement.
+
+Calls run **4 in flight** with a **150 second** timeout. Both numbers are
+answers to a real failure: at 60 seconds and one at a time, 27 of 32 calls
+timed out and the stage took most of an hour to return one number. A 429, a
+5xx **or a read timeout** is retried once after 10 seconds; a second failure
+becomes a `pagespeed_error` row rather than a crash.
 
 Both lab and field data are recorded. Field (CrUX) data is real users and is
 preferred; when there is none at URL level the origin is used, and
@@ -214,9 +226,26 @@ zero**, and the page score is the sum of the buckets. The floor matters: a
 page with a dozen on-page faults should not rank below a page that cannot be
 indexed at all.
 
-`site_score` is the mean page score when the performance sample did not run,
-and `0.85 x mean page score + 0.15 x mean mobile performance` when it did.
-The summary states which of the two it is, and the note spells out the mix.
+`site_score` is the mean page score, plus performance when there is enough of
+it to mean anything. The 15% performance component applies **only when at
+least half the sampled URLs returned a mobile score**; below that the
+component is reported but not folded in, and the summary says so with the
+ratio. One successful measurement out of sixteen once moved a site score by
+eight points, which is noise wearing a number's clothes.
+
+**Pages marked noindex are excluded from the site mean and the distribution.**
+They still get their own score, and the summary lists how many there are and
+up to twenty of their URLs — but a page the site deliberately kept out of the
+index should not drag down the average of the pages it wants indexed.
+
+**Site-wide faults deduct from the site score, not from a page.** Missing
+HSTS, CSP, `X-Content-Type-Options`, `X-Frame-Options` and a missing
+http-to-https redirect are `scope: "site"` in the weight table: together they
+cost at most 5 points off `site_score`, recorded as `site_level_deduction`
+with the types that fired. Previously they landed on whichever row carried
+them, which was the homepage, so a site-wide gap cost one page's score.
+`scope: "once"` still means a group finding (duplicate titles, a broken
+internal target) that deducts from its representative page as before.
 
 The weights live in **`seo_audit/score_weights.json`**, which is data, not
 code: edit the numbers there to retune the audit without touching Python.

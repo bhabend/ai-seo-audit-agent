@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
@@ -28,9 +30,18 @@ STRATEGIES = ("mobile", "desktop")
 KEY_ENV_VAR = "PAGESPEED_API_KEY"
 
 DEFAULT_TEMPLATE_SAMPLE = 15
-CALL_TIMEOUT = 60
+# 60 s was not enough: 27 of 32 calls timed out on a real site. The API can
+# take well over a minute on a heavy page, and a timeout costs the whole
+# measurement.
+CALL_TIMEOUT = 150
 RETRY_AFTER_SECONDS = 10
 RETRY_STATUSES = (429, 500, 502, 503, 504)
+# Calls run concurrently: they are Google's work, not the audited site's, so
+# they need no politeness delay and serialising them wasted most of an hour.
+MAX_IN_FLIGHT = 4
+# Every measurement gets at most two attempts, so the ceiling is fixed before
+# the first call and enforced, not merely hoped for.
+ATTEMPTS_PER_CALL = 2
 
 # Thresholds. Google's own "poor" boundaries, not invented ones.
 POOR_PERFORMANCE_SCORE = 50
@@ -222,12 +233,30 @@ class PageSpeedClient:
 
     def __init__(self, fetcher, key: Optional[str] = None,
                  timeout: int = CALL_TIMEOUT,
-                 retry_after: float = RETRY_AFTER_SECONDS):
+                 retry_after: float = RETRY_AFTER_SECONDS,
+                 attempts_ceiling: Optional[int] = None):
         self.fetcher = fetcher
         self.key = key if key is not None else api_key()
         self.timeout = timeout
         self.retry_after = retry_after
-        self.calls_made = 0
+        self.attempts_ceiling = attempts_ceiling
+        self.attempts = 0
+        self.measurements = 0
+        self._lock = threading.Lock()
+
+    @property
+    def calls_made(self) -> int:
+        """Kept for readers of older output: attempts, not measurements."""
+        return self.attempts
+
+    def _take_attempt(self) -> bool:
+        """Claim one attempt against the ceiling, or refuse."""
+        with self._lock:
+            if (self.attempts_ceiling is not None
+                    and self.attempts >= self.attempts_ceiling):
+                return False
+            self.attempts += 1
+            return True
 
     def measure(self, url: str, strategy: str) -> PageSpeedResult:
         """One URL, one strategy, one retry on a rate limit or server error."""
@@ -239,12 +268,18 @@ class PageSpeedClient:
         if self.key:
             params["key"] = self.key
 
-        for attempt in (0, 1):
-            self.calls_made += 1
-            status, payload, error = self._get(params)
+        for attempt in range(ATTEMPTS_PER_CALL):
+            if not self._take_attempt():
+                return PageSpeedResult(
+                    url=url, strategy=strategy,
+                    error=f"attempts ceiling of {self.attempts_ceiling} reached")
+            status, payload, error, timed_out = self._get(params)
             if error is None and status == 200 and isinstance(payload, dict):
+                with self._lock:
+                    self.measurements += 1
                 return parse_response(payload, url, strategy)
-            retryable = status in RETRY_STATUSES
+            # A read timeout is worth one more go: the API is slow, not broken.
+            retryable = (status in RETRY_STATUSES) or timed_out
             if retryable and attempt == 0:
                 time.sleep(self.retry_after)
                 continue
@@ -254,7 +289,7 @@ class PageSpeedClient:
                                error="exhausted retries")
 
     def _get(self, params: Dict):
-        """The one request. Kept separate so tests can drive it directly."""
+        """The one request, as (status, payload, error, timed_out)."""
         import json as _json
 
         import requests
@@ -262,12 +297,14 @@ class PageSpeedClient:
         try:
             response = self.fetcher.session.get(
                 ENDPOINT, params=params, timeout=self.timeout)
+        except requests.exceptions.Timeout as exc:
+            return None, None, f"{type(exc).__name__}: {exc}", True
         except requests.exceptions.RequestException as exc:
-            return None, None, f"{type(exc).__name__}: {exc}"
+            return None, None, f"{type(exc).__name__}: {exc}", False
         try:
-            return response.status_code, response.json(), None
+            return response.status_code, response.json(), None, False
         except (ValueError, _json.JSONDecodeError):
-            return response.status_code, None, "response was not JSON"
+            return response.status_code, None, "response was not JSON", False
 
 
 def issues_for(result: PageSpeedResult) -> List[Tuple[str, str]]:
@@ -312,9 +349,21 @@ class PageSpeedRun:
 
     results: List[PageSpeedResult] = field(default_factory=list)
     samples: List[Sample] = field(default_factory=list)
-    calls_made: int = 0
+    calls_made: int = 0          # attempts, including retries
+    attempts_ceiling: int = 0
+    measurements: int = 0        # attempts that returned a usable result
     skipped: bool = False
     skip_reason: Optional[str] = None
+
+    @property
+    def sampled_urls(self) -> int:
+        return len(self.samples)
+
+    def mobile_scores(self) -> List[Optional[int]]:
+        """One entry per sampled URL, None where the measurement failed."""
+        by_url = {r.url: r.performance_score for r in self.results
+                  if r.strategy == "mobile"}
+        return [by_url.get(s.url) for s in self.samples]
 
     @property
     def pages_represented(self) -> int:
@@ -337,10 +386,15 @@ class PageSpeedRun:
                 "performance_score": worst.performance_score}
 
     def summary(self) -> Dict:
+        measured_mobile = sum(1 for s in self.mobile_scores() if s is not None)
         return {
             "skipped": self.skipped,
             "skip_reason": self.skip_reason,
+            "pagespeed_attempts": self.calls_made,
+            "pagespeed_attempts_ceiling": self.attempts_ceiling,
+            "pagespeed_calls": self.measurements,
             "calls_made": self.calls_made,
+            "mobile_measured": measured_mobile,
             "templates_sampled": len(self.samples),
             "pages_represented": self.pages_represented,
             "mean_mobile_score": self.mean_score("mobile"),
@@ -373,12 +427,28 @@ def run_pagespeed(fetcher, pages: List[Tuple[str, int, int]],
         return run
 
     run.samples = choose_templates(pages, limit=limit, homepage=homepage)
-    client = PageSpeedClient(fetcher, key=resolved_key)
-    for sample in run.samples:
-        for strategy in STRATEGIES:
-            result = client.measure(sample.url, strategy)
-            result.template = sample.template
-            result.group_size = sample.group_size
-            run.results.append(result)
-    run.calls_made = client.calls_made
+    # Fixed before the first call and enforced inside the client, so the cost
+    # of a run is knowable in advance whatever the API does.
+    ceiling = ATTEMPTS_PER_CALL * len(run.samples) * len(STRATEGIES)
+    run.attempts_ceiling = ceiling
+
+    client = PageSpeedClient(fetcher, key=resolved_key,
+                             attempts_ceiling=ceiling)
+    jobs = [(sample, strategy) for sample in run.samples
+            for strategy in STRATEGIES]
+
+    def measure(job):
+        sample, strategy = job
+        result = client.measure(sample.url, strategy)
+        result.template = sample.template
+        result.group_size = sample.group_size
+        return result
+
+    if jobs:
+        with ThreadPoolExecutor(max_workers=min(MAX_IN_FLIGHT,
+                                                len(jobs))) as executor:
+            run.results = list(executor.map(measure, jobs))
+
+    run.calls_made = client.attempts
+    run.measurements = client.measurements
     return run

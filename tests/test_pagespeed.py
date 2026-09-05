@@ -167,7 +167,11 @@ def test_the_call_budget_is_two_per_sampled_url(monkeypatch):
                             limit=15, key="test-key")
 
     assert len(run.samples) == 16          # 15 templates plus the homepage
-    assert run.calls_made == 32            # the documented maximum
+    # calls_made counts attempts. All 32 succeed here so there are no
+    # retries; the enforced ceiling is twice this (see test_corrections).
+    assert run.calls_made == 32
+    assert run.attempts_ceiling == 64
+    assert run.measurements == 32
     assert len(run.results) == 32
     # 30 sections exist but only 15 are sampled, so the run represents
     # 15 x 5 pages plus the homepage -- a subset, and the summary says so.
@@ -237,7 +241,9 @@ def test_pagespeed_csv_is_the_seventh_file_with_two_rows_per_url(tmp_path,
 
     ps = run.summary["pagespeed"]
     assert ps["skipped"] is False
-    assert ps["calls_made"] == len(run.pagespeed)
+    assert ps["pagespeed_attempts"] == len(run.pagespeed)
+    assert ps["pagespeed_calls"] == len(run.pagespeed)
+    assert ps["pagespeed_attempts_ceiling"] == 2 * len(run.pagespeed)
     assert ps["mean_mobile_score"] == 92
 
 

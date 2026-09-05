@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import time
+import threading
 from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -57,6 +58,9 @@ THROTTLE_WINDOW = 100
 THROTTLE_RATE = 0.5
 MAX_SWEEP_DELAY = 4.0
 
+# External link checks: someone else's uptime, on our clock. One attempt.
+EXTERNAL_CHECK_TIMEOUT = 5
+
 
 @dataclass
 class CrawlOutcome:
@@ -75,6 +79,7 @@ class CrawlOutcome:
     sweep_capped: bool = False
     sweep_throttled: bool = False
     sweep_throttled_responses: int = 0
+    redirect_duplicates: int = 0
     link_stats: Dict[str, int] = field(default_factory=dict)
     content_stats: Dict[str, int] = field(default_factory=dict)
     pagespeed_stats: Dict = field(default_factory=dict)
@@ -127,7 +132,22 @@ class _Crawler:
         # Blocked URLs already reported, so one forbidden path linked from
         # thirty pages produces one issue row, not thirty.
         self.blocked_seen: set = set()
+        # Item 1: every final_url already parsed. Several requested URLs can
+        # redirect to one page; parsing it more than once inflated
+        # pages_parsed, skewed the mean score and put one URL twice into the
+        # worst-pages list. Claimed under a lock because workers race for it.
+        self.parsed_finals: set = set()
+        self._parsed_lock = threading.Lock()
+        self.redirect_duplicates = 0
         self.pages_done = 0
+
+    def claim_page(self, final_url: str) -> bool:
+        """True if this worker is the first to reach `final_url`."""
+        with self._parsed_lock:
+            if final_url in self.parsed_finals:
+                return False
+            self.parsed_finals.add(final_url)
+            return True
 
     # ---- bookkeeping -----------------------------------------------------
 
@@ -163,6 +183,8 @@ class _Crawler:
         self.status_by_final[final] = row.get("status_code")
         if row.get("in_sitemap"):
             self.sitemap_crawled.add(final)
+        if row.get("redirect_duplicate"):
+            self.redirect_duplicates += 1
         self._log_row_issues(row)
         if page is not None:
             self._record_page(row, page, findings or [])
@@ -277,9 +299,17 @@ class _Crawler:
         links: List[str] = []
         page = None
         findings: List = []
-        if result.html:
+        duplicate = False
+        base = result.final_url or url
+
+        # Only a page that answered 200 with HTML is worth parsing, and only
+        # the first URL to reach it. A second URL redirecting to the same page
+        # still gets its raw_crawl row, so the redirect stays a finding.
+        if result.html and result.status_code == 200:
+            duplicate = not self.claim_page(base)
+
+        if result.html and not duplicate:
             self.html_store.save(url, result.html)
-            base = result.final_url or url
             soup = make_soup(result.html)
             all_links = extract_links(soup, base)
             links = [
@@ -287,8 +317,6 @@ class _Crawler:
                 if is_same_site(target, self.config.host,
                                 self.config.include_subdomains)
             ]
-            # Only a page that actually answered 200 is worth judging: a 404
-            # body is a real HTML page, but it is not a page of the site.
             if result.status_code == 200:
                 page, findings = self._parse_and_check(result, base, soup,
                                                        all_links)
@@ -305,6 +333,7 @@ class _Crawler:
             "text_chars": result.text_chars,
             "error": result.error,
             "redirect_loop": result.redirect_loop,
+            "redirect_duplicate": duplicate,
         }
         return row, links, page, findings
 
@@ -428,6 +457,9 @@ def run_crawl(config: AuditConfig, out_dir: Optional[str] = None,
             "text_chars": home.text_chars,
             "error": home.error,
             "redirect_loop": home.redirect_loop,
+            # The homepage is always the first page reached, so it can never
+            # be a duplicate; stated explicitly so the column is never blank.
+            "redirect_duplicate": False,
         }
         home_headers = dict(home.headers)
         if home.html:
@@ -475,6 +507,10 @@ def run_crawl(config: AuditConfig, out_dir: Optional[str] = None,
         crawler = _Crawler(config, fetcher, issues, rows, html_store, outcome,
                            pages=pages_csv, page_issues=page_issues)
         crawler.robots = robots
+        if home_row is not None and home_page is not None:
+            # The homepage was parsed before the crawler existed; claim it so
+            # nothing reaching the same final URL is parsed a second time.
+            crawler.claim_page(home_row.get("final_url") or home_row["url"])
 
         # --- sitemaps, now resolved against the adopted host ---
         sitemap = discover_sitemaps(fetcher, config, robots)
@@ -908,7 +944,10 @@ def _run_link_and_content_checks(crawler: _Crawler, page_issues: PageIssueLog,
     unchecked = len(external) - len(checked)
     external_broken = 0
     for target in checked:
-        result = crawler.fetcher.head(target)
+        # A third-party host that hangs must cost seconds, not the crawl
+        # timeout times three attempts.
+        result = crawler.fetcher.head(target, timeout=EXTERNAL_CHECK_TIMEOUT,
+                                      max_retries=0)
         status = result.status_code
         if status is None or status >= 400:
             external_broken += 1
@@ -917,6 +956,7 @@ def _run_link_and_content_checks(crawler: _Crawler, page_issues: PageIssueLog,
                 f"{'no response' if status is None else 'HTTP ' + str(status)}, "
                 f"{describe_referrers(crawler.graph.external_targets[target])}")
 
+    outcome.redirect_duplicates = crawler.redirect_duplicates
     outcome.link_stats = {
         "pages_with_zero_inlinks": zero_inlinks,
         "orphan_pages_in_sitemap": orphans_in_sitemap,
@@ -1041,6 +1081,7 @@ def _finalise_pages(crawler: _Crawler, pages_path: str,
                 row["anchor_texts"] = ";".join(stats.anchor_texts)
 
             found = by_page.get(final_url, [])
+            board.note_site_issues(found)
             page = score_page(found, weights, final_url)
             board.add(page)
             row.update(page.as_columns())
@@ -1050,6 +1091,7 @@ def _finalise_pages(crawler: _Crawler, pages_path: str,
     os.replace(temp_path, pages_path)
 
     run = getattr(crawler, "pagespeed", None)
-    mobile = [r.performance_score for r in (run.results if run else [])
-              if r.strategy == "mobile"]
-    crawler.outcome.score_stats = board.site_score(mobile).as_summary()
+    mobile = run.mobile_scores() if run and not run.skipped else []
+    sampled = run.sampled_urls if run and not run.skipped else 0
+    crawler.outcome.score_stats = board.site_score(
+        mobile, sampled_urls=sampled).as_summary()

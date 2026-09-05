@@ -29,6 +29,7 @@ CSV_COLUMNS = [
     "discovered_from",
     "text_chars",
     "error",
+    "redirect_duplicate",
 ]
 
 SWEEP_COLUMNS = [
@@ -249,6 +250,7 @@ def build_summary(outcome) -> Dict[str, Any]:
             "examples": stats.render_examples,
         },
         "pages_parsed": stats.pages_parsed,
+        "redirect_duplicates": outcome.redirect_duplicates,
         "canonical_targets_unchecked": outcome.canonical_targets_unchecked,
         "canonical_check_limit": config.canonical_check_limit,
         "page_issue_counts": outcome.page_issue_counts,

@@ -196,16 +196,24 @@ class Fetcher:
                 time.sleep(remaining)
         self._local.last_request = time.monotonic()
 
-    def _request(self, url: str, method: str = "GET"):
-        """One request with backoff on transport errors only, never on 4xx/5xx."""
+    def _request(self, url: str, method: str = "GET",
+                 timeout: Optional[float] = None,
+                 max_retries: Optional[int] = None):
+        """One request with backoff on transport errors only, never on 4xx/5xx.
+
+        `timeout` and `max_retries` default to the crawl's settings. The
+        external link check overrides both: a dead third-party host should
+        cost seconds, not a minute of crawl budget.
+        """
         last_error = None
-        for attempt in range(self.max_retries + 1):
+        retries = self.max_retries if max_retries is None else max_retries
+        for attempt in range(retries + 1):
             self._wait_turn()
             try:
                 return self.session.request(
                     method,
                     url,
-                    timeout=self.config.timeout,
+                    timeout=self.config.timeout if timeout is None else timeout,
                     allow_redirects=True,
                 ), None
             except requests.exceptions.TooManyRedirects as exc:
@@ -214,7 +222,7 @@ class Fetcher:
                     requests.exceptions.Timeout,
                     requests.exceptions.ChunkedEncodingError) as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
-                if attempt < self.max_retries:
+                if attempt < retries:
                     time.sleep(self.backoff * (2 ** attempt))
             except requests.exceptions.RequestException as exc:
                 return None, f"{type(exc).__name__}: {exc}"
@@ -253,15 +261,19 @@ class Fetcher:
             result.error = f"decode failed: {type(exc).__name__}: {exc}"
         return result
 
-    def head(self, url: str) -> FetchResult:
-        """Status-only check for the sitemap sweep. No body, no HTML, no store.
+    def head(self, url: str, timeout: Optional[float] = None,
+             max_retries: Optional[int] = None) -> FetchResult:
+        """Status-only check. No body, no HTML, no store.
 
         Falls back to GET when the server rejects HEAD (405/501) or answers
-        without saying what it served.
+        without saying what it served. `timeout` and `max_retries` let a
+        caller trade thoroughness for speed: the sitemap sweep wants the
+        crawl's patience, the external link check does not.
         """
         result = FetchResult(url=url)
         started = time.perf_counter()
-        response, error = self._request(url, method="HEAD")
+        response, error = self._request(url, method="HEAD", timeout=timeout,
+                                        max_retries=max_retries)
 
         needs_get = (
             response is None
@@ -269,7 +281,9 @@ class Fetcher:
             or not response.headers.get("Content-Type")
         )
         if needs_get and error is None:
-            response, error = self._request(url, method="GET")
+            response, error = self._request(url, method="GET",
+                                            timeout=timeout,
+                                            max_retries=max_retries)
 
         result.response_time_ms = int((time.perf_counter() - started) * 1000)
         if response is None:
