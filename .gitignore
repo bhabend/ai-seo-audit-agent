@@ -1,4 +1,9 @@
 venv/
+.venv/
 __pycache__/
 *.pyc
 .env
+/output/
+/output/**/*.csv
+.streamlit/secrets.toml
+.pytest_cache/
