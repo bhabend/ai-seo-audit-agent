@@ -17,7 +17,9 @@ def test_flags_reach_the_parser():
     assert args.keep_html is False
     assert args.sweep_limit == 10000
     assert args.sweep_delay == 0.25
-    assert args.canonical_check_limit == 200
+    assert args.canonical_check_limit == 500
+    assert args.external_check_limit == 200
+    assert args.write_links is False
 
 
 def test_cli_writes_every_artefact_and_prints_the_summary(tmp_path, capsys):

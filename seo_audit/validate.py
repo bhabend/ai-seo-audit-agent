@@ -98,7 +98,17 @@ def check_page(fields: PageFields, schema: SchemaResult,
         found.append(("schema_invalid_json",
                       f"{schema.invalid_count} block(s) failed to parse: {detail}"))
     if schema.block_count == 0:
-        found.append(("schema_missing", "no JSON-LD on the page"))
+        if fields.has_microdata:
+            # Structured data is there, just not in the format rich results
+            # prefer. Reporting "no schema" here would be our limitation
+            # stated as the page's fault.
+            found.append((
+                "schema_microdata_only",
+                "structured data is microdata/RDFa only ("
+                + ", ".join(fields.microdata_types[:5]) + "), no JSON-LD"))
+        else:
+            found.append(("schema_missing",
+                          "no JSON-LD and no microdata on the page"))
     for type_name, prop in schema.missing_properties:
         found.append(("schema_missing_property",
                       f"{type_name} is missing {prop}"))

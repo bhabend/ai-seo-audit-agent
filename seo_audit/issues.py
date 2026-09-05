@@ -48,8 +48,8 @@ CRAWLER_EFFECT: Dict[str, str] = {
         "The page is reachable by links but missing from the sitemap, so "
         "discovery depends entirely on internal linking.",
     "sitemap_only_page":
-        "No internal link points at this page, so it receives no link equity "
-        "and is discovered only because the sitemap lists it.",
+        "The sitemap lists this page but no crawled page links to it, so it "
+        "receives no internal link equity and depends on the sitemap alone.",
     "deep_page":
         "Pages more than three clicks from the homepage are crawled less "
         "often and tend to rank worse.",
@@ -66,6 +66,9 @@ CRAWLER_EFFECT: Dict[str, str] = {
     "render_suspect":
         "Almost no text arrives in the HTML, so a crawler that does not run "
         "JavaScript sees a nearly empty page.",
+    "sweep_throttled":
+        "The site started refusing the sweep, so the URLs after that point "
+        "were never checked and their status is unknown, not broken.",
     "sitemap_sweep_capped":
         "The sitemap is larger than the sweep limit, so the URLs past the cap "
         "were never status-checked and their state is unknown.",
@@ -121,6 +124,18 @@ PAGE_ISSUE_SEVERITY: Dict[str, str] = {
     "duplicate_meta_description": "low",
     "sitemap_noindex": "high",
     "sitemap_off_canonical": "medium",
+    # links
+    "orphan_page": "medium",
+    "low_inlink_page": "low",
+    "broken_internal_link": "high",
+    "redirected_internal_link": "low",
+    "nofollow_internal_link": "low",
+    "generic_anchor": "low",
+    "external_link_broken": "medium",
+    # content
+    "duplicate_content": "medium",
+    "near_duplicate_content": "low",
+    "schema_microdata_only": "low",
     # site level, recorded once on the homepage row
     "http_to_https_redirect": "high",
     "hsts_missing": "medium",

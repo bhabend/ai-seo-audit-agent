@@ -42,10 +42,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sweep-delay", type=float, default=0.25,
                         help="Per-worker delay for sweep requests only "
                              "(default 0.25). HEAD is cheap; pages are not.")
-    parser.add_argument("--canonical-check-limit", type=int, default=200,
+    parser.add_argument("--canonical-check-limit", type=int, default=500,
                         help="Most canonical targets outside the crawl that "
                              "will be checked with HEAD (default 200). The "
                              "rest are reported as unchecked.")
+    parser.add_argument("--external-check-limit", type=int, default=200,
+                        help="Most distinct external link targets to check "
+                             "with HEAD (default 200). The rest are counted "
+                             "as unchecked, never assumed working.")
+    parser.add_argument("--write-links", action="store_true",
+                        help="Also write links.csv (source, target, anchor, "
+                             "nofollow). Off by default: the edge list is "
+                             "far larger than the page list.")
     parser.add_argument("--timeout", type=int, default=20)
     parser.add_argument("--no-robots", action="store_true",
                         help="Do not fetch or obey robots.txt.")
@@ -73,6 +81,8 @@ def main(argv=None) -> int:
         sweep_limit=args.sweep_limit,
         sweep_delay=args.sweep_delay,
         canonical_check_limit=args.canonical_check_limit,
+        external_check_limit=args.external_check_limit,
+        write_links=args.write_links,
         timeout=args.timeout,
         respect_robots=not args.no_robots,
         include_subdomains=args.include_subdomains,

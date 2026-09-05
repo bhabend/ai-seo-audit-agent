@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 import time
-from collections import Counter
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -33,16 +33,27 @@ from .issues import (DEEP_PAGE_DEPTH, RENDER_SUSPECT_CHARS, SLOW_DOCUMENT_MS,
                      ai_crawler_groups)
 from .output import (AUDIT_PAGE_COLUMNS, CSV_COLUMNS, SWEEP_COLUMNS,
                      CrawlStats, HtmlStore, StreamingCsv, write_summary_json)
+from .content import MIN_WORDS_FOR_COMPARISON, ContentIndex, fingerprint
+from .links import (LinkGraph, cap_note, describe_referrers,
+                    is_generic_anchor)
 from .parse import is_document_url, parse_page
 from .schema import parse_schema
-from .urlnorm import (extract_links, is_same_site, make_soup, normalize,
-                      slash_variant)
+from .urlnorm import (distinct_targets, extract_links, is_same_site,
+                      make_soup, normalize, slash_variant)
 from .validate import (CrossPageIndex, PageRecord, check_cross_page,
                        check_page, check_site_level)
 
 # How many URLs are in flight at once, as a multiple of the worker count.
 # Caps how much page HTML can exist at any moment.
 CHUNK_PER_WORKER = 4
+
+# Sweep throttle guard. 403 and 503 are how a site says "slow down"; treating
+# them as sitemap defects told a client two thirds of their sitemap was dead.
+THROTTLE_STATUSES = (403, 503)
+THROTTLE_CONSECUTIVE = 20
+THROTTLE_WINDOW = 100
+THROTTLE_RATE = 0.5
+MAX_SWEEP_DELAY = 4.0
 
 
 @dataclass
@@ -60,6 +71,11 @@ class CrawlOutcome:
     sweep_blocked: int = 0
     sitemap_urls_total: int = 0
     sweep_capped: bool = False
+    sweep_throttled: bool = False
+    sweep_throttled_responses: int = 0
+    link_stats: Dict[str, int] = field(default_factory=dict)
+    content_stats: Dict[str, int] = field(default_factory=dict)
+    canonical_targets_unchecked: int = 0
     page_issue_counts: Dict[str, int] = field(default_factory=dict)
     page_issue_severity: Dict[str, int] = field(default_factory=dict)
     sweep_status_counts: Counter = field(default_factory=Counter)
@@ -88,6 +104,13 @@ class _Crawler:
         self.pages = pages
         self.page_issues = page_issues
         self.index = CrossPageIndex()
+        self.graph = LinkGraph(config.host, config.include_subdomains)
+        self.content = ContentIndex()
+        # url -> final_url for every fetched URL, so a link to the redirecting
+        # form of a page still credits the page that answered (lesson 6).
+        self.url_to_final: Dict[str, str] = {}
+        self.status_by_final: Dict[str, Optional[int]] = {}
+        self.sitemap_crawled: set = set()
         self.html_store = html_store
         self.outcome = outcome
         self.robots: Optional[RobotsInfo] = None
@@ -128,9 +151,14 @@ class _Crawler:
         row["in_sitemap"] = url in self.sitemap_set
         self.rows.write(row)
         self.outcome.stats.add(row)
+        final = row.get("final_url") or url
         self.index.note_status(url, row.get("status_code"))
-        if row.get("final_url"):
-            self.index.note_status(row["final_url"], row.get("status_code"))
+        self.index.note_status(final, row.get("status_code"))
+        # The map lesson 6 needs: a link to `/x` must credit `/x/`.
+        self.url_to_final[url] = final
+        self.status_by_final[final] = row.get("status_code")
+        if row.get("in_sitemap"):
+            self.sitemap_crawled.add(final)
         self._log_row_issues(row)
         if page is not None:
             self._record_page(row, page, findings or [])
@@ -171,6 +199,11 @@ class _Crawler:
         if self.page_issues is not None:
             for issue_type, detail in findings:
                 self.page_issues.add(issue_type, row["url"], final_url, detail)
+
+        self.graph.add_page(final_url, page.pop("_links", []) or [])
+        simhash_value = page.get("_simhash", 0)
+        self.content.add(final_url, page.get("content_md5", ""),
+                         simhash_value, page.get("word_count", 0) or 0)
 
         self.index.add_page(PageRecord(
             url=row["url"],
@@ -223,10 +256,8 @@ class _Crawler:
         if row.get("in_crawl") and not row.get("in_sitemap"):
             self.issues.add("crawl_only_page", url, referrer,
                             "reachable by links, absent from the sitemap")
-        if (row.get("in_sitemap") and not row.get("in_crawl")
-                and url not in self.link_discovered):
-            self.issues.add("sitemap_only_page", url, None,
-                            "no internal link points here")
+        # sitemap_only_page is NOT raised here: it needs the link graph, so
+        # it moved to the post-crawl pass where inlinks are actually known.
 
     # ---- fetching --------------------------------------------------------
 
@@ -247,8 +278,8 @@ class _Crawler:
             soup = make_soup(result.html)
             all_links = extract_links(soup, base)
             links = [
-                href for href in all_links
-                if is_same_site(href, self.config.host,
+                target for target in distinct_targets(all_links)
+                if is_same_site(target, self.config.host,
                                 self.config.include_subdomains)
             ]
             # Only a page that actually answered 200 is worth judging: a 404
@@ -278,6 +309,10 @@ class _Crawler:
         fields = parse_page(soup, base, all_links, self.config.host,
                             self.config.include_subdomains, result.headers)
         findings = check_page(fields, schema, base)
+        # The text is fingerprinted here and dropped here: 16 bytes leave the
+        # worker, never the page text.
+        marks = fingerprint(fields.visible_text, fields.word_count)
+        fields.visible_text = ""
         page = {
             "title": fields.title,
             "title_length": fields.title_length,
@@ -308,10 +343,16 @@ class _Crawler:
             "schema_types": ";".join(schema.types),
             "schema_block_count": schema.block_count,
             "schema_invalid_count": schema.invalid_count,
+            "microdata_types": ";".join(fields.microdata_types),
+            "has_microdata": fields.has_microdata,
+            "content_simhash": marks.simhash_hex,
+            "content_md5": marks.md5,
             # Underscored keys never reach the CSV; the writer drops them.
             "_schema_types": schema.types,
             "_noindex": fields.is_noindex,
             "_hreflang": fields.hreflang,
+            "_links": all_links,
+            "_simhash": marks.simhash,
         }
         return page, findings
 
@@ -389,8 +430,8 @@ def run_crawl(config: AuditConfig, out_dir: Optional[str] = None,
             soup = make_soup(home.html)
             all_links = extract_links(soup, base)
             home_links = [
-                href for href in all_links
-                if is_same_site(href, config.host, config.include_subdomains)
+                target for target in distinct_targets(all_links)
+                if is_same_site(target, config.host, config.include_subdomains)
             ]
             if home.status_code == 200:
                 home_page, home_findings = _parse_page_fields(
@@ -504,6 +545,7 @@ def run_crawl(config: AuditConfig, out_dir: Optional[str] = None,
             _sweep(crawler, sitemap_urls, sweep_csv, executor, chunk_size)
 
         # --- after the crawl: checks that need more than one page ---
+        _run_link_and_content_checks(crawler, page_issues, pages_csv, out_dir)
         _run_cross_page_checks(crawler, page_issues)
         _run_site_level_checks(crawler, page_issues, home_row, home_headers)
 
@@ -586,12 +628,29 @@ def _sweep(crawler: _Crawler, sitemap_urls: List[str], sweep_csv: StreamingCsv,
             "redirect_loop": result.redirect_loop,
         }
 
+    # Throttle guard. A site that starts refusing the sweep is not a site
+    # whose sitemap is broken, and the two must never be recorded as one.
+    consecutive = 0
+    recent: deque = deque(maxlen=THROTTLE_WINDOW)
+    current_delay = crawler.config.sweep_delay
+    stopped_at = None
+
     for chunk in _chunks(todo, chunk_size):
+        if stopped_at is not None:
+            break
         for row in executor.map(check, chunk):
             url = row["url"]
             row["in_crawl"] = url in crawler.link_discovered
             sweep_csv.write(row)
             outcome.sweep_checked += 1
+
+            status = row["status_code"]
+            throttling = status in THROTTLE_STATUSES
+            if not row["blocked_by_robots"]:
+                recent.append(1 if throttling else 0)
+                consecutive = consecutive + 1 if throttling else 0
+                if throttling:
+                    outcome.sweep_throttled_responses += 1
 
             if row["blocked_by_robots"]:
                 outcome.sweep_blocked += 1
@@ -600,12 +659,16 @@ def _sweep(crawler: _Crawler, sitemap_urls: List[str], sweep_csv: StreamingCsv,
                     "robots_blocked_in_sitemap", url, None,
                     "listed in the sitemap but disallowed by robots.txt")
             else:
-                status = row["status_code"]
                 outcome.sweep_status_counts[
                     str(status) if status is not None else "no_response"] += 1
                 if row.get("error") or status is None:
                     crawler.issues.add("fetch_error", url, None,
                                        str(row.get("error")))
+                elif throttling or outcome.sweep_throttled:
+                    # 403 and 503 are how a site says "slow down". They are
+                    # never counted as a dead sitemap entry, and once we know
+                    # we are being throttled nothing after that is trusted.
+                    pass
                 elif status != 200:
                     crawler.issues.add("sitemap_non_200", url, None,
                                        f"HTTP {status}")
@@ -616,9 +679,24 @@ def _sweep(crawler: _Crawler, sitemap_urls: List[str], sweep_csv: StreamingCsv,
                 if row.get("redirect_loop"):
                     crawler.issues.add("redirect_loop", url, None,
                                        "redirect chain never resolved")
-            if not row["in_crawl"]:
-                crawler.issues.add("sitemap_only_page", url, None,
-                                   "no internal link points here")
+
+            if throttling and current_delay < MAX_SWEEP_DELAY:
+                current_delay = min(current_delay * 2, MAX_SWEEP_DELAY)
+                crawler.fetcher.set_delay(current_delay)
+
+            rate = sum(recent) / len(recent) if len(recent) == THROTTLE_WINDOW else 0
+            if consecutive >= THROTTLE_CONSECUTIVE or rate > THROTTLE_RATE:
+                outcome.sweep_throttled = True
+                stopped_at = url
+                break
+
+    if stopped_at is not None:
+        crawler.issues.add(
+            "sweep_throttled", crawler.config.domain, None,
+            f"stopped after {outcome.sweep_checked} of {len(todo)} sitemap "
+            f"URLs: {outcome.sweep_throttled_responses} responses were 403 or "
+            f"503, last at {stopped_at}. Those are rate limiting, not broken "
+            f"sitemap entries, and are not counted as such.")
     crawler.fetcher.set_delay(page_delay)
 
 
@@ -638,6 +716,8 @@ def _parse_page_fields(result, base: str, soup, all_links: List[str],
     fields = parse_page(soup, base, all_links, config.host,
                         config.include_subdomains, result.headers)
     findings = check_page(fields, schema, base)
+    marks = fingerprint(fields.visible_text, fields.word_count)
+    fields.visible_text = ""
     page = {
         "title": fields.title,
         "title_length": fields.title_length,
@@ -667,9 +747,15 @@ def _parse_page_fields(result, base: str, soup, all_links: List[str],
         "schema_types": ";".join(schema.types),
         "schema_block_count": schema.block_count,
         "schema_invalid_count": schema.invalid_count,
+        "microdata_types": ";".join(fields.microdata_types),
+        "has_microdata": fields.has_microdata,
+        "content_simhash": marks.simhash_hex,
+        "content_md5": marks.md5,
         "_schema_types": schema.types,
         "_noindex": fields.is_noindex,
         "_hreflang": fields.hreflang,
+        "_links": all_links,
+        "_simhash": marks.simhash,
     }
     return page, findings
 
@@ -685,10 +771,14 @@ def _run_cross_page_checks(crawler: _Crawler,
         result = crawler.fetcher.head(url)
         return result.status_code
 
+    unchecked = 0
     for issue_type, url, final_url, detail in check_cross_page(
             crawler.index, head_check=head_check,
             canonical_check_limit=crawler.config.canonical_check_limit):
+        if issue_type == "canonical_target_unchecked":
+            unchecked += 1
         page_issues.add(issue_type, url, final_url, detail)
+    crawler.outcome.canonical_targets_unchecked = unchecked
 
 
 def _run_site_level_checks(crawler: _Crawler, page_issues: PageIssueLog,
@@ -709,3 +799,186 @@ def _run_site_level_checks(crawler: _Crawler, page_issues: PageIssueLog,
     for issue_type, detail in findings:
         page_issues.add(issue_type, home_row["url"], final_url, detail,
                         site_level=True)
+
+
+def _run_link_and_content_checks(crawler: _Crawler, page_issues: PageIssueLog,
+                                 pages_csv: StreamingCsv,
+                                 out_dir: str) -> None:
+    """Build the link graph, compare fingerprints, and write both verdicts.
+
+    Runs after the crawl because a link graph is only meaningful once there is
+    something to point at, and because a page's inlink count is not knowable
+    while pages are still arriving.
+    """
+    config = crawler.config
+    outcome = crawler.outcome
+    cap = config.max_pages
+    within = cap_note(cap)
+
+    # Lesson 6: a link to the redirecting form of a page credits the page.
+    crawler.graph.resolve(crawler.url_to_final)
+
+    parsed = set(crawler.index.pages)
+    per_page = crawler.graph.per_page(parsed)
+    home = normalize(config.start_url)
+    home_final = crawler.url_to_final.get(home, home)
+
+    zero_inlinks = 0
+    for final_url, record in crawler.index.pages.items():
+        stats = per_page.get(final_url)
+        if stats is None:
+            continue
+        if stats.inlinks == 0:
+            zero_inlinks += 1
+            if final_url != home_final:
+                page_issues.add(
+                    "orphan_page", record.url, final_url,
+                    f"no crawled page links here, {within}")
+        elif stats.inlinks == 1:
+            page_issues.add("low_inlink_page", record.url, final_url,
+                            f"exactly 1 inbound link {within}")
+
+        if stats.nofollow_outlinks:
+            page_issues.add(
+                "nofollow_internal_link", record.url, final_url,
+                f"{stats.nofollow_outlinks} internal link(s) on this page "
+                f"carry rel=nofollow")
+
+        anchors = crawler.graph.inbound_anchors(final_url)
+        if anchors and all(is_generic_anchor(a) for a in anchors):
+            page_issues.add(
+                "generic_anchor", record.url, final_url,
+                f"every inbound anchor is generic: "
+                f"{', '.join(sorted(set(anchors))[:5])}")
+
+        # A2: only a crawled sitemap page with no inbound link is orphaned by
+        # the sitemap's own account. Swept-only URLs never qualify.
+        if (record.in_sitemap and stats.inlinks == 0
+                and final_url != home_final):
+            crawler.issues.add(
+                "sitemap_only_page", final_url, None,
+                f"listed in the sitemap, crawled, and no crawled page links "
+                f"here ({within})")
+
+    # --- targets the crawl saw as broken or redirecting ---
+    broken = 0
+    redirected = 0
+    by_target: Dict[str, set] = {}
+    for edge in crawler.graph.edges:
+        by_target.setdefault(edge.target, set()).add(edge.source)
+
+    for target, sources in sorted(by_target.items()):
+        status = crawler.status_by_final.get(target)
+        if status is None:
+            status = crawler.index.status_by_url.get(target)
+        if status is None:
+            continue  # never fetched: not a claim we can make
+        if status >= 400:
+            broken += 1
+            page_issues.add("broken_internal_link", target, target,
+                            f"HTTP {status}, {describe_referrers(sources)}")
+
+    for url, final in crawler.url_to_final.items():
+        if url == final:
+            continue
+        sources = by_target.get(final, set()) | by_target.get(url, set())
+        if not sources:
+            continue
+        redirected += 1
+        page_issues.add("redirected_internal_link", url, final,
+                        f"links point at {url}, which redirects to {final}; "
+                        f"{describe_referrers(sources)}")
+
+    # --- external links, capped ---
+    external = sorted(crawler.graph.external_targets)
+    limit = config.external_check_limit
+    checked = external[:limit]
+    unchecked = len(external) - len(checked)
+    external_broken = 0
+    for target in checked:
+        result = crawler.fetcher.head(target)
+        status = result.status_code
+        if status is None or status >= 400:
+            external_broken += 1
+            page_issues.add(
+                "external_link_broken", target, target,
+                f"{'no response' if status is None else 'HTTP ' + str(status)}, "
+                f"{describe_referrers(crawler.graph.external_targets[target])}")
+
+    outcome.link_stats = {
+        "pages_with_zero_inlinks": zero_inlinks,
+        "broken_internal_targets": broken,
+        "redirected_internal_targets": redirected,
+        "external_targets_found": len(external),
+        "external_checked": len(checked),
+        "external_broken": external_broken,
+        "external_unchecked": unchecked,
+        "external_check_limit": limit,
+        "edges": len(crawler.graph.edges),
+    }
+
+    # --- duplicate and near-duplicate content ---
+    exact = crawler.content.exact_groups()
+    near = crawler.content.near_groups()
+    for group in exact:
+        page_issues.add("duplicate_content", group[0], group[0],
+                        f"{len(group)} pages have identical text: "
+                        f"{', '.join(group[:5])}"
+                        + (f", and {len(group) - 5} more" if len(group) > 5 else ""))
+    for group in near:
+        page_issues.add("near_duplicate_content", group[0], group[0],
+                        f"{len(group)} pages are near-identical "
+                        f"(simhash distance <= 3): {', '.join(group[:5])}"
+                        + (f", and {len(group) - 5} more" if len(group) > 5 else ""))
+    outcome.content_stats = {
+        "duplicate_groups": len(exact),
+        "near_duplicate_groups": len(near),
+        "pages_compared": len(crawler.content.comparable()),
+        "min_words_for_comparison": MIN_WORDS_FOR_COMPARISON,
+    }
+
+    # --- the per-page link columns, merged into audit_pages.csv ---
+    # The rows streamed during the crawl, before any of this was knowable.
+    # One row-by-row rewrite fills the link columns in without ever holding
+    # the page list in memory.
+    pages_csv.close()
+    _merge_link_columns(pages_csv.path, per_page)
+
+    if config.write_links:
+        links_csv = StreamingCsv(os.path.join(out_dir, "links.csv"),
+                                 ["source", "target", "anchor", "nofollow"])
+        try:
+            for edge in crawler.graph.edges:
+                links_csv.write({"source": edge.source, "target": edge.target,
+                                 "anchor": edge.anchor,
+                                 "nofollow": edge.nofollow})
+        finally:
+            links_csv.close()
+        crawler.outcome.paths["links_csv"] = os.path.join(out_dir, "links.csv")
+
+
+def _merge_link_columns(path: str, per_page: Dict[str, object]) -> None:
+    """Fill in the link columns on an already-streamed audit_pages.csv.
+
+    Reads and writes one row at a time, so a 2,000-page file costs one row of
+    memory, not two thousand.
+    """
+    import csv as _csv
+    import tempfile
+
+    temp_path = path + ".merging"
+    with open(path, encoding="utf-8-sig", newline="") as source,             open(temp_path, "w", encoding="utf-8-sig", newline="") as target:
+        reader = _csv.DictReader(source)
+        writer = _csv.DictWriter(target, fieldnames=AUDIT_PAGE_COLUMNS,
+                                 extrasaction="ignore")
+        writer.writeheader()
+        for row in reader:
+            stats = per_page.get(row.get("final_url"))
+            if stats is not None:
+                row["inlinks"] = stats.inlinks
+                row["nofollow_inlinks"] = stats.nofollow_inlinks
+                row["outlinks_internal"] = stats.outlinks_internal
+                row["outlinks_external"] = stats.outlinks_external
+                row["anchor_texts"] = ";".join(stats.anchor_texts)
+            writer.writerow(row)
+    os.replace(temp_path, path)

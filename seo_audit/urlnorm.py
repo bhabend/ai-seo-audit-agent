@@ -8,6 +8,8 @@ here goes through urlparse/urljoin instead of substring matching.
 from __future__ import annotations
 
 import posixpath
+import re
+from dataclasses import dataclass
 from typing import List, Optional
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
@@ -26,6 +28,8 @@ TRACKING_PARAMS = {
 TRACKING_PREFIXES = ("utm_",)
 
 DEFAULT_PORTS = {"http": "80", "https": "443"}
+
+_WHITESPACE_RE = re.compile(r"\s+")
 
 # Schemes we never follow.
 NON_FETCHABLE_SCHEMES = {
@@ -186,17 +190,54 @@ def make_soup(html: str):
     return BeautifulSoup(html, "lxml")
 
 
-def extract_links(soup, base_url: str) -> List[str]:
-    """Absolute, normalised hrefs from every <a> in `soup` (order preserved).
+@dataclass(frozen=True)
+class Link:
+    """One outgoing link: where it points, what it said, and whether it counts."""
 
-    Takes an already-built soup rather than raw HTML so the caller controls
-    how many times a page is parsed.
+    target: str
+    anchor: str = ""
+    nofollow: bool = False
+
+
+# Anchor text long enough to be useful, short enough not to bloat the graph.
+MAX_ANCHOR_CHARS = 120
+
+
+def extract_links(soup, base_url: str) -> List[Link]:
+    """Every <a> in `soup` as a Link, in document order.
+
+    Returns anchor text and rel alongside the href so the link graph, the
+    nofollow count and the anchor-text checks all come off the one pass the
+    page already had. Deduped on (target, anchor): the same page linked twice
+    under two different anchors is two facts, not one.
     """
     seen = set()
-    out = []
+    out: List[Link] = []
     for anchor in soup.find_all("a", href=True):
-        normalised = normalize(anchor["href"], base=base_url)
-        if normalised and normalised not in seen:
-            seen.add(normalised)
-            out.append(normalised)
+        target = normalize(anchor["href"], base=base_url)
+        if not target:
+            continue
+        text = _WHITESPACE_RE.sub(" ", anchor.get_text(" ", strip=True)).strip()
+        if len(text) > MAX_ANCHOR_CHARS:
+            text = text[:MAX_ANCHOR_CHARS]
+        rel = anchor.get("rel") or []
+        if isinstance(rel, str):
+            rel = rel.split()
+        nofollow = any(r.lower() == "nofollow" for r in rel)
+        key = (target, text)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(Link(target=target, anchor=text, nofollow=nofollow))
+    return out
+
+
+def distinct_targets(links: List[Link]) -> List[str]:
+    """The unique URLs a page links to, in first-seen order."""
+    seen = set()
+    out = []
+    for link in links:
+        if link.target not in seen:
+            seen.add(link.target)
+            out.append(link.target)
     return out

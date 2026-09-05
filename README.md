@@ -11,10 +11,10 @@ Read that first.
 
 ## What is built so far
 
-The crawl layer (URL discovery and fetch) and the page layer (field
-extraction, JSON-LD and validation). Internal link analysis, scoring, the
-report and the Streamlit console are not built yet. The sections below
-describe only what runs today.
+The crawl layer (URL discovery and fetch), the page layer (field extraction,
+JSON-LD and validation), and the link and content layer (internal link graph,
+duplicate detection). Scoring, the report and the Streamlit console are not
+built yet. The sections below describe only what runs today.
 
 ## Install
 
@@ -95,9 +95,13 @@ later. All four files are UTF-8 with a BOM, so Excel opens them cleanly.
   link counts, JSON-LD types, and this page's own issue list.
 - **`page_issues.csv`**: one row per finding, with `issue_type`, `severity`
   (high, medium, low), `url`, `final_url`, `detail` and `site_level`.
+- **`links.csv`** (only with `--write-links`): the raw edge list. Off by
+  default because the edge list is an order of magnitude larger than the page
+  list and the per-page aggregates answer most questions; turn it on when you
+  want to trace individual links.
 - **`crawl_summary.json`**: the run in numbers, including per-type issue
-  counts, page issue counts by type and severity, schema type counts, the
-  sweep totals and the depth distribution.
+  counts, page issue counts by type and severity, schema type counts, link
+  and content totals, the sweep totals and the depth distribution.
 
 `text_chars` is the visible text length after script/style/noscript are
 stripped. Pages under 500 characters are counted as `render_suspects`: they
@@ -109,6 +113,53 @@ parsing is worth anything.
 a link. The link crawl is drained first; a slice of the page budget
 (`--sitemap-reserve`, 25% by default) is held back for those sitemap-only
 URLs, so coverage gaps still show up in a capped run.
+
+## Honest aggregates
+
+Any count that depends on a cap says so, in the finding itself and in the
+summary. An orphan page is reported as having no inbound links **"within the
+2000 pages this run crawled"**, not as having none on the site, because the
+tool cannot know the second thing. The same rule covers the sweep cap, the
+canonical check limit and the external check limit: each reports what it
+checked and what it did not, and nothing is assumed working because it was
+never looked at.
+
+Two counts had to be corrected under this rule after earlier runs:
+
+- **`sitemap_non_200` no longer counts 403 or 503 at all.** Those are how a
+  site says "slow down". When the sweep starts seeing them it doubles its
+  delay up to 4 seconds, and if 20 arrive in a row (or more than half of the
+  last hundred) it stops and writes one `sweep_throttled` row saying how far
+  it got. A throttled sweep is an unknown, not a dead sitemap: a previous run
+  reported two thirds of a sitemap as broken when the site was simply rate
+  limiting.
+- **`sitemap_only_page` now means something.** It is raised only for a URL
+  that is in the sitemap, **was crawled**, and has no inbound link from any
+  other crawled page. URLs the sweep merely status-checked never raise it,
+  because nothing was parsed for them and their inbound links are unknown.
+
+## The link graph
+
+Built after the crawl from edges the workers emit, one per `<a>` with its
+anchor text and `rel`. Every target is resolved through the crawl's
+url to final_url map first: a page linked only as `/x` when the site serves
+`/x/` has one inbound link, not zero, and is not an orphan.
+
+From it: `inlinks`, `nofollow_inlinks`, `outlinks_internal`,
+`outlinks_external` and up to five distinct inbound `anchor_texts` per page,
+plus `orphan_page`, `low_inlink_page`, `broken_internal_link` (one row per
+broken target with its referrer count, so fifty links to one dead page are
+one finding), `redirected_internal_link`, `nofollow_internal_link`,
+`generic_anchor` and `external_link_broken`.
+
+## Duplicate content
+
+Each page gets two fingerprints, both computed in the worker and both 16
+bytes: an md5 of its normalised text, and a 64-bit simhash over overlapping
+word shingles. Exact duplicates group by md5; near-duplicates group by simhash
+Hamming distance of 3 or less. Pages under 200 words are never compared, since
+navigation furniture repeats across a site and would group everything. The
+page text itself is never stored.
 
 ## What gets parsed, and what a check is keyed on
 
@@ -124,9 +175,12 @@ differ, and a canonical that correctly points at where the page ended up would
 otherwise be reported as a fault on every redirect. `audit_pages.csv` carries
 both columns so the join is always available.
 
-**Structured data means JSON-LD.** Microdata and RDFa are not read at all, so
-a page marked up entirely in microdata reports as having no schema. Presence
-is not treated as validity: for the types the tool knows (Organization,
+**Structured data is validated as JSON-LD only.** Microdata and RDFa are
+*detected* -- their type names appear in `microdata_types` and `has_microdata`
+-- but their properties are not checked. A page whose only structured data is
+microdata is reported as `schema_microdata_only`, not as `schema_missing`;
+`schema_missing` now means no JSON-LD **and** no microdata. Presence is not
+treated as validity: for the JSON-LD types the tool knows (Organization,
 WebSite, WebPage, BreadcrumbList, FAQPage, Article, BlogPosting, Product,
 Service, LocalBusiness, Place) the required properties are checked and
 reported as `schema_missing_property`. Types it does not know are listed and
@@ -170,7 +224,8 @@ All tests are offline: no network, no API keys.
 
 - `seo_audit/`: the package. All audit logic lives here.
   - `crawl.py` fetches; `parse.py` reads a page's fields; `schema.py` reads
-    its JSON-LD; `validate.py` turns those facts into findings.
+    its JSON-LD; `links.py` builds the internal link graph; `content.py`
+    fingerprints the text; `validate.py` turns those facts into findings.
   - A page gets exactly one BeautifulSoup pass, shared by link extraction,
     field parsing and JSON-LD, and the HTML is released inside the worker
     before the next page starts.
@@ -183,7 +238,7 @@ All tests are offline: no network, no API keys.
 
 1. Crawl layer (done)
 2. Parse, technical validation, schema validation, sitemap hygiene (done)
-3. Links, content similarity, PageSpeed sample, scoring
+3. Links and content similarity (done); PageSpeed sample and scoring
 4. Findings JSON, report narrative, docx report, baseline vs full mode
 5. Streamlit console with optional Search Console upload
 

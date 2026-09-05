@@ -186,3 +186,86 @@ def test_sweep_delay_applies_to_the_sweep_and_is_handed_back(tmp_path):
     assert seen[0] == 0.0
     assert 0.25 in seen
     assert seen[-1] == 0.0
+
+
+# --- A1: the throttle guard -------------------------------------------------
+
+def throttled_site(tmp_path, throttle_status=503, good=5,
+                   sweep_delay=0.0, **overrides):
+    """A sitemap whose sweep starts refusing after `good` URLs."""
+    total = 60
+    urls = "".join(f"<url><loc>{BASE}/s{i}</loc></url>" for i in range(total))
+    pages = {BASE + "/": html_page([])}
+
+    def extra(mock):
+        for i in range(total):
+            url = BASE + f"/s{i}"
+            status = 200 if i < good else throttle_status
+            mock.head(url, status_code=status,
+                      headers={"Content-Type": "text/html"})
+            mock.get(url, status_code=status,
+                     headers={"Content-Type": "text/html"}, text="x")
+
+    return crawl_site(
+        tmp_path, pages,
+        sitemaps={BASE + "/sitemap.xml":
+                  f'<?xml version="1.0"?><urlset>{urls}</urlset>'},
+        extra=extra, max_pages=1, workers=1, sweep_delay=sweep_delay,
+        **overrides)
+
+
+def test_sweep_stops_after_twenty_consecutive_throttled_responses(tmp_path):
+    run = throttled_site(tmp_path, throttle_status=503, good=5)
+
+    assert run.summary["sitemap_sweep"]["sweep_throttled"] is True
+    # 5 good then 20 refusals: it stops rather than grinding through 60.
+    assert run.summary["sitemap_sweep"]["sitemap_urls_swept"] == 25
+    assert run.summary["sitemap_sweep"]["sweep_throttled_responses"] == 20
+    assert len(run.sweep) == 25
+
+
+def test_throttled_responses_are_never_counted_as_sitemap_defects(tmp_path):
+    """The Supermicro lesson: 503 means slow down, not 'this page is dead'."""
+    run = throttled_site(tmp_path, throttle_status=503, good=5)
+    assert run.issues_of("sitemap_non_200") == []
+
+    throttled = run.issues_of("sweep_throttled")
+    assert len(throttled) == 1
+    assert "not broken sitemap entries" in throttled[0]["detail"]
+    assert "20 responses were 403 or 503" in throttled[0]["detail"]
+
+
+def test_403_is_treated_as_throttling_too(tmp_path):
+    run = throttled_site(tmp_path, throttle_status=403, good=5)
+    assert run.summary["sitemap_sweep"]["sweep_throttled"] is True
+    assert run.issues_of("sitemap_non_200") == []
+    # The statuses are still recorded honestly in the sweep CSV.
+    assert any(r["status_code"] == "403" for r in run.sweep)
+
+
+def test_a_genuine_404_is_still_a_sitemap_defect(tmp_path):
+    """404 is not a throttle signal and must keep being reported."""
+    run = throttled_site(tmp_path, throttle_status=404, good=5)
+    assert run.summary["sitemap_sweep"]["sweep_throttled"] is False
+    assert len(run.issues_of("sitemap_non_200")) == 55
+    assert run.issues_of("sweep_throttled") == []
+
+
+def test_the_sweep_delay_backs_off_while_being_throttled(tmp_path):
+    seen = []
+    import seo_audit.crawl as crawl_module
+    original = crawl_module.Fetcher.set_delay
+
+    def spy(self, delay):
+        seen.append(delay)
+        return original(self, delay)
+
+    crawl_module.Fetcher.set_delay = spy
+    try:
+        throttled_site(tmp_path, throttle_status=503, good=5, sweep_delay=0.25)
+    finally:
+        crawl_module.Fetcher.set_delay = original
+
+    # 0.25 doubling towards the 4s ceiling, then handed back to the page delay.
+    assert 0.5 in seen and 1.0 in seen
+    assert max(seen) <= 4.0

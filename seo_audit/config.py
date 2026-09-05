@@ -30,7 +30,9 @@ class AuditConfig:
     keep_html: bool = False
     sweep_limit: int = 10000
     sweep_delay: float = 0.25
-    canonical_check_limit: int = 200
+    canonical_check_limit: int = 500
+    external_check_limit: int = 200
+    write_links: bool = False
     user_agent: str = DEFAULT_USER_AGENT
     respect_robots: bool = True
     include_subdomains: bool = False
@@ -58,6 +60,9 @@ class AuditConfig:
         if self.canonical_check_limit < 0:
             raise ValueError("canonical_check_limit must not be negative, got "
                              f"{self.canonical_check_limit}")
+        if self.external_check_limit < 0:
+            raise ValueError("external_check_limit must not be negative, got "
+                             f"{self.external_check_limit}")
 
         raw = self.domain.strip()
         if "://" not in raw:

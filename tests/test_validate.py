@@ -349,3 +349,73 @@ def test_present_security_headers_are_not_reported(tmp_path):
              if i["site_level"] == "True"}
     # frame-ancestors in the CSP satisfies X-Frame-Options.
     assert types == set()
+
+
+# --- A4: microdata counts as structured data --------------------------------
+
+MICRODATA_BODY = ('<div itemscope itemtype="https://schema.org/Product">'
+                  '<span itemprop="name">A product</span></div>')
+
+
+def no_jsonld(body="", head=""):
+    """A page with no JSON-LD block at all."""
+    return (f"<!doctype html><html lang='en'><head>"
+            + GOOD_HEAD.format(canonical=BASE + "/") + head +
+            f"</head><body><h1>Heading</h1><p>{BODY_WORDS}</p>{body}</body></html>")
+
+
+def test_microdata_only_page_is_not_reported_as_missing_schema(tmp_path):
+    run = crawl_site(tmp_path, {BASE + "/": no_jsonld(MICRODATA_BODY)})
+
+    assert run.page_issues_of("schema_missing") == []
+    only = run.page_issues_of("schema_microdata_only")
+    assert [i["final_url"] for i in only] == [BASE + "/"]
+    assert only[0]["severity"] == "low"
+    assert "Product" in only[0]["detail"]
+
+    row = run.pages_by_url()[BASE + "/"]
+    assert row["has_microdata"] == "True"
+    assert row["microdata_types"] == "Product"
+
+
+def test_rdfa_typeof_is_detected_too(tmp_path):
+    run = crawl_site(tmp_path, {
+        BASE + "/": no_jsonld('<div typeof="foaf:Person"></div>')})
+    assert run.pages_by_url()[BASE + "/"]["microdata_types"] == "Person"
+    assert run.page_issues_of("schema_missing") == []
+
+
+def test_no_structured_data_at_all_is_still_schema_missing(tmp_path):
+    run = crawl_site(tmp_path, {BASE + "/": no_jsonld()})
+    missing = run.page_issues_of("schema_missing")
+    assert [i["final_url"] for i in missing] == [BASE + "/"]
+    assert "no JSON-LD and no microdata" in missing[0]["detail"]
+    assert run.page_issues_of("schema_microdata_only") == []
+    assert run.pages_by_url()[BASE + "/"]["has_microdata"] == "False"
+
+
+def test_h1_multiple_is_low_severity(tmp_path):
+    run = crawl_site(tmp_path, {
+        BASE + "/": page(BASE + "/").replace(
+            "<h1>Heading</h1>", "<h1>One</h1><h1>Two</h1>"),
+    })
+    rows = run.page_issues_of("h1_multiple")
+    assert rows and rows[0]["severity"] == "low"
+
+
+def test_canonical_check_limit_default_is_five_hundred():
+    from seo_audit.config import AuditConfig
+    assert AuditConfig(domain="example.com").canonical_check_limit == 500
+
+
+def test_summary_states_how_many_canonical_targets_went_unchecked(tmp_path):
+    pages = {BASE + "/": page(BASE + "/", links=["/a"])}
+    pages[BASE + "/a"] = page(BASE + "/away-a")
+
+    def extra(mock):
+        mock.head(f"{BASE}/away-a", status_code=200,
+                  headers={"Content-Type": "text/html"})
+
+    run = crawl_site(tmp_path, pages, extra=extra, canonical_check_limit=0)
+    assert run.summary["canonical_targets_unchecked"] == 1
+    assert run.summary["canonical_check_limit"] == 0

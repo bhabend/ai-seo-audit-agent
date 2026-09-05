@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
-from .urlnorm import is_same_site, normalize
+from .urlnorm import distinct_targets, is_same_site, normalize
 
 # Extensions that make a link a document rather than a page. Documents are
 # indexable in their own right, so they are reported, not condemned.
@@ -65,6 +65,12 @@ class PageFields:
     external_links: int = 0
     nofollow_internal_links: int = 0
     mixed_content: List[str] = field(default_factory=list)
+    microdata_types: List[str] = field(default_factory=list)
+    visible_text: str = ""
+
+    @property
+    def has_microdata(self) -> bool:
+        return bool(self.microdata_types)
 
     @property
     def h1_count(self) -> int:
@@ -113,15 +119,42 @@ def _meta_content(soup, name: str) -> Optional[str]:
     return None
 
 
-def visible_word_count(soup) -> int:
-    """Words a reader would see, with script/style/nav furniture removed."""
+def visible_text(soup) -> str:
+    """The text a reader would see, with script and style stripped out.
+
+    Destructive: it removes those elements from the soup, so nothing that
+    needs them may run afterwards. The text is returned rather than counted
+    because the content fingerprint needs it -- and it is dropped inside the
+    worker, never stored.
+    """
     for node in soup(["script", "style", "noscript", "template"]):
         node.extract()
     body = soup.body or soup
-    return len(_text(body).split())
+    return _text(body)
 
 
-def parse_page(soup, final_url: str, links: List[str], host: str,
+def extract_microdata_types(soup) -> List[str]:
+    """Schema.org type names declared as microdata or RDFa.
+
+    Presence only: microdata properties are not validated. Without this a
+    page marked up entirely in microdata reports as having no structured
+    data at all, which is a claim about our reader, not about the page.
+    """
+    found = set()
+    for tag in soup.find_all(attrs={"itemtype": True}):
+        for value in str(tag.get("itemtype", "")).split():
+            name = value.rstrip("/").rsplit("/", 1)[-1]
+            if name:
+                found.add(name)
+    for tag in soup.find_all(attrs={"typeof": True}):
+        for value in str(tag.get("typeof", "")).split():
+            name = value.split(":")[-1].rstrip("/").rsplit("/", 1)[-1]
+            if name:
+                found.add(name)
+    return sorted(found)
+
+
+def parse_page(soup, final_url: str, links: List, host: str,
                include_subdomains: bool = False,
                response_headers: Optional[Dict[str, str]] = None) -> PageFields:
     """Read one page's SEO fields off the shared soup.
@@ -181,26 +214,25 @@ def parse_page(soup, final_url: str, links: List[str], host: str,
             # An empty alt is a deliberate "decorative" marker, not a fault.
             fields.images_empty_alt += 1
 
-    for href in links:
+    for href in distinct_targets(links):
         if is_same_site(href, host, include_subdomains):
             fields.internal_links += 1
         else:
             fields.external_links += 1
 
-    for anchor in soup.find_all("a", href=True):
-        rel = anchor.get("rel") or []
-        if isinstance(rel, str):
-            rel = rel.split()
-        if any(r.lower() == "nofollow" for r in rel):
-            resolved = normalize(anchor["href"], base=final_url)
-            if resolved and is_same_site(resolved, host, include_subdomains):
-                fields.nofollow_internal_links += 1
+    # rel comes off the same pass now, so there is no second walk of the DOM.
+    nofollow_targets = {link.target for link in links if link.nofollow}
+    fields.nofollow_internal_links = sum(
+        1 for target in nofollow_targets
+        if is_same_site(target, host, include_subdomains))
 
     fields.mixed_content = find_mixed_content(soup, final_url)
+    fields.microdata_types = extract_microdata_types(soup)
 
-    # Word count last: it strips script and style out of the soup, so nothing
-    # that needs those elements may run after it.
-    fields.word_count = visible_word_count(soup)
+    # Text last: it strips script and style out of the soup, so nothing that
+    # needs those elements may run after it.
+    fields.visible_text = visible_text(soup)
+    fields.word_count = len(fields.visible_text.split())
     return fields
 
 

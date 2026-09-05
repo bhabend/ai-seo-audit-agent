@@ -12,6 +12,17 @@ from seo_audit.crawl import run_crawl
 
 BASE = "https://example.com"
 
+# External hosts the fixtures link to. Registered before any test runs.
+EXTERNAL_HOSTS = (
+    "https://other.com/",
+    "https://other.com/outside",
+    "https://elsewhere.com/",
+    "https://elsewhere.com/x",
+    "https://partner.com/",
+    "https://dead.com/gone",
+    "https://blog.example.com/post",
+)
+
 
 def make_config(**overrides) -> AuditConfig:
     """An AuditConfig with test-friendly defaults (no delay, small caps)."""
@@ -42,6 +53,15 @@ def register_site(mock, pages, robots=None, sitemaps=None):
     `pages` maps absolute URL -> html string (or a dict of kwargs for the mock).
     robots.txt and the conventional sitemap paths 404 unless supplied.
     """
+    # Lesson 7: every request path the new code can take is registered up
+    # front, so a missing mock never masquerades as a code failure. The
+    # external-link check HEADs whatever hosts a fixture links to.
+    for host in EXTERNAL_HOSTS:
+        mock.head(host, status_code=200,
+                  headers={"Content-Type": "text/html"})
+        mock.get(host, status_code=200,
+                 headers={"Content-Type": "text/html"}, text="external")
+
     # The site-level check asks whether plain http redirects to https.
     # Registered first so a test's own `extra` can override it.
     mock.head("http://example.com/", status_code=301,
@@ -90,6 +110,8 @@ class Run:
         self.issues = read_rows(outcome.paths["crawl_issues_csv"])
         self.sweep = read_rows(outcome.paths["sitemap_sweep_csv"])
         self.pages = read_rows(outcome.paths["audit_pages_csv"])
+        self.links = (read_rows(outcome.paths["links_csv"])
+                      if "links_csv" in outcome.paths else [])
         self.page_issues = read_rows(outcome.paths["page_issues_csv"])
         with open(outcome.paths["crawl_summary_json"], encoding="utf-8") as fh:
             self.summary = json.load(fh)
