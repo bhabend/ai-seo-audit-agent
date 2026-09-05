@@ -163,6 +163,11 @@ anchor text and `rel`. Every target is resolved through the crawl's
 url to final_url map first: a page linked only as `/x` when the site serves
 `/x/` has one inbound link, not zero, and is not an orphan.
 
+External targets are checked **8 at a time**: they are other people's servers,
+independent of each other and of the audited site, and checking 1,000 of them
+one after another cost 19 minutes. Results are collected in submission order,
+so the most-linked target is still reported first.
+
 From it: `inlinks`, `nofollow_inlinks`, `outlinks_internal`,
 `outlinks_external` and up to five distinct inbound `anchor_texts` per page,
 plus `orphan_page`, `low_inlink_page`, `broken_internal_link` (one row per
@@ -201,6 +206,16 @@ answers to a real failure: at 60 seconds and one at a time, 27 of 32 calls
 timed out and the stage took most of an hour to return one number. A 429, a
 5xx **or a read timeout** is retried once after 10 seconds; a second failure
 becomes a `pagespeed_error` row rather than a crash.
+
+The attempt ceiling bounds cost; a **12 minute stage deadline** bounds time.
+Once it passes no new call starts, calls already in flight finish normally,
+and every URL that was never attempted gets a `pagespeed_error` row reading
+`stage deadline` at severity `unmeasured` — never silence, and never a row
+that could be mistaken for a healthy page. The summary reports
+`pagespeed_deadline_hit` and `pagespeed_stage_seconds`.
+
+`pagespeed.csv` is written **one row per call as it completes**, so a stage
+that runs out of time still leaves everything it measured.
 
 Both lab and field data are recorded. Field (CrUX) data is real users and is
 preferred; when there is none at URL level the origin is used, and

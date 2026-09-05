@@ -39,6 +39,11 @@ RETRY_STATUSES = (429, 500, 502, 503, 504)
 # Calls run concurrently: they are Google's work, not the audited site's, so
 # they need no politeness delay and serialising them wasted most of an hour.
 MAX_IN_FLIGHT = 4
+# A whole-stage deadline. The attempt ceiling bounds cost; this bounds time.
+# 32 measurements at 150 s two attempts deep is 40 minutes of worst case, and
+# a run that never ends is a run nobody waits for.
+STAGE_DEADLINE_SECONDS = 12 * 60
+DEADLINE_REASON = "stage deadline"
 # Every measurement gets at most two attempts, so the ceiling is fixed before
 # the first call and enforced, not merely hoped for.
 ATTEMPTS_PER_CALL = 2
@@ -234,15 +239,28 @@ class PageSpeedClient:
     def __init__(self, fetcher, key: Optional[str] = None,
                  timeout: int = CALL_TIMEOUT,
                  retry_after: float = RETRY_AFTER_SECONDS,
-                 attempts_ceiling: Optional[int] = None):
+                 attempts_ceiling: Optional[int] = None,
+                 deadline: Optional[float] = None):
         self.fetcher = fetcher
         self.key = key if key is not None else api_key()
         self.timeout = timeout
         self.retry_after = retry_after
         self.attempts_ceiling = attempts_ceiling
+        self.deadline = deadline
         self.attempts = 0
         self.measurements = 0
+        self.deadline_hit = False
         self._lock = threading.Lock()
+
+    def past_deadline(self) -> bool:
+        """True once no new call may start. In-flight calls are left alone."""
+        if self.deadline is None:
+            return False
+        if time.monotonic() >= self.deadline:
+            with self._lock:
+                self.deadline_hit = True
+            return True
+        return False
 
     @property
     def calls_made(self) -> int:
@@ -269,6 +287,9 @@ class PageSpeedClient:
             params["key"] = self.key
 
         for attempt in range(ATTEMPTS_PER_CALL):
+            if self.past_deadline():
+                return PageSpeedResult(url=url, strategy=strategy,
+                                       error=DEADLINE_REASON)
             if not self._take_attempt():
                 return PageSpeedResult(
                     url=url, strategy=strategy,
@@ -352,6 +373,8 @@ class PageSpeedRun:
     calls_made: int = 0          # attempts, including retries
     attempts_ceiling: int = 0
     measurements: int = 0        # attempts that returned a usable result
+    deadline_hit: bool = False
+    stage_seconds: float = 0.0
     skipped: bool = False
     skip_reason: Optional[str] = None
 
@@ -393,6 +416,8 @@ class PageSpeedRun:
             "pagespeed_attempts": self.calls_made,
             "pagespeed_attempts_ceiling": self.attempts_ceiling,
             "pagespeed_calls": self.measurements,
+            "pagespeed_deadline_hit": self.deadline_hit,
+            "pagespeed_stage_seconds": round(self.stage_seconds, 1),
             "calls_made": self.calls_made,
             "mobile_measured": measured_mobile,
             "templates_sampled": len(self.samples),
@@ -407,7 +432,9 @@ class PageSpeedRun:
 def run_pagespeed(fetcher, pages: List[Tuple[str, int, int]],
                   homepage: Optional[str], limit: int = DEFAULT_TEMPLATE_SAMPLE,
                   enabled: bool = True,
-                  key: Optional[str] = None) -> PageSpeedRun:
+                  key: Optional[str] = None,
+                  deadline_seconds: float = STAGE_DEADLINE_SECONDS,
+                  on_result=None) -> PageSpeedRun:
     """Sample templates and measure each on mobile and desktop.
 
     Missing key or --no-pagespeed skips the stage cleanly: it is a section the
@@ -432,8 +459,10 @@ def run_pagespeed(fetcher, pages: List[Tuple[str, int, int]],
     ceiling = ATTEMPTS_PER_CALL * len(run.samples) * len(STRATEGIES)
     run.attempts_ceiling = ceiling
 
+    started = time.monotonic()
     client = PageSpeedClient(fetcher, key=resolved_key,
-                             attempts_ceiling=ceiling)
+                             attempts_ceiling=ceiling,
+                             deadline=started + deadline_seconds)
     jobs = [(sample, strategy) for sample in run.samples
             for strategy in STRATEGIES]
 
@@ -442,6 +471,9 @@ def run_pagespeed(fetcher, pages: List[Tuple[str, int, int]],
         result = client.measure(sample.url, strategy)
         result.template = sample.template
         result.group_size = sample.group_size
+        # Streamed as it completes: a stage that is stopped keeps its results.
+        if on_result is not None:
+            on_result(result)
         return result
 
     if jobs:
@@ -451,4 +483,6 @@ def run_pagespeed(fetcher, pages: List[Tuple[str, int, int]],
 
     run.calls_made = client.attempts
     run.measurements = client.measurements
+    run.deadline_hit = client.deadline_hit
+    run.stage_seconds = time.monotonic() - started
     return run

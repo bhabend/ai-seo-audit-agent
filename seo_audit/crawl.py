@@ -37,7 +37,8 @@ from .output import (AUDIT_PAGE_COLUMNS, CSV_COLUMNS, SWEEP_COLUMNS,
 from .content import MIN_WORDS_FOR_COMPARISON, ContentIndex, fingerprint
 from .links import (LinkGraph, cap_note, describe_referrers,
                     is_generic_anchor)
-from .pagespeed import PAGESPEED_COLUMNS, issues_for, run_pagespeed
+from .pagespeed import (PAGESPEED_COLUMNS, api_key as pagespeed_key,
+                         issues_for, run_pagespeed)
 from .parse import is_document_url, parse_page
 from .scoring import ScoreBoard, load_weights, score_page
 from .schema import parse_schema
@@ -58,8 +59,10 @@ THROTTLE_WINDOW = 100
 THROTTLE_RATE = 0.5
 MAX_SWEEP_DELAY = 4.0
 
-# External link checks: someone else's uptime, on our clock. One attempt.
+# External link checks: someone else's uptime, on our clock. One attempt,
+# and eight at a time -- 1,000 targets took 19 minutes one at a time.
 EXTERNAL_CHECK_TIMEOUT = 5
+EXTERNAL_CHECK_WORKERS = 8
 
 
 @dataclass
@@ -943,18 +946,30 @@ def _run_link_and_content_checks(crawler: _Crawler, page_issues: PageIssueLog,
     checked = external[:limit]
     unchecked = len(external) - len(checked)
     external_broken = 0
-    for target in checked:
+
+    def check_external(target: str):
         # A third-party host that hangs must cost seconds, not the crawl
         # timeout times three attempts.
-        result = crawler.fetcher.head(target, timeout=EXTERNAL_CHECK_TIMEOUT,
-                                      max_retries=0)
-        status = result.status_code
-        if status is None or status >= 400:
-            external_broken += 1
-            page_issues.add(
-                "external_link_broken", target, target,
-                f"{'no response' if status is None else 'HTTP ' + str(status)}, "
-                f"{describe_referrers(crawler.graph.external_targets[target])}")
+        return crawler.fetcher.head(target, timeout=EXTERNAL_CHECK_TIMEOUT,
+                                    max_retries=0)
+
+    if checked:
+        # Someone else's uptime, on our clock: these are independent of each
+        # other and of the audited site, so they run wide. executor.map keeps
+        # submission order, so the most-linked targets are still reported
+        # first even though they finish out of order.
+        with ThreadPoolExecutor(
+                max_workers=min(EXTERNAL_CHECK_WORKERS,
+                                len(checked))) as pool:
+            for target, result in zip(checked, pool.map(check_external,
+                                                        checked)):
+                status = result.status_code
+                if status is None or status >= 400:
+                    external_broken += 1
+                    page_issues.add(
+                        "external_link_broken", target, target,
+                        f"{'no response' if status is None else 'HTTP ' + str(status)}, "
+                        f"{describe_referrers(crawler.graph.external_targets[target])}")
 
     outcome.redirect_duplicates = crawler.redirect_duplicates
     outcome.link_stats = {
@@ -1011,7 +1026,11 @@ def _run_link_and_content_checks(crawler: _Crawler, page_issues: PageIssueLog,
 
 def _run_pagespeed(crawler: _Crawler, page_issues: PageIssueLog,
                    out_dir: str) -> None:
-    """Measure a sample of templates, or say plainly why we did not."""
+    """Measure a sample of templates, or say plainly why we did not.
+
+    Rows are written as each call returns, not gathered and dumped at the end,
+    so a stage that runs out of time still leaves what it measured.
+    """
     config = crawler.config
     per_page = getattr(crawler, "per_page", {})
     pages = [(final_url, getattr(per_page.get(final_url), "inlinks", 0), 0)
@@ -1021,24 +1040,34 @@ def _run_pagespeed(crawler: _Crawler, page_issues: PageIssueLog,
     if home_final not in crawler.index.pages:
         home_final = None
 
-    run = run_pagespeed(crawler.fetcher, pages, home_final,
-                        limit=config.pagespeed_templates,
-                        enabled=config.pagespeed)
-    crawler.pagespeed = run
-    crawler.outcome.pagespeed_stats = run.summary()
-
-    if run.skipped:
+    if not config.pagespeed or not pagespeed_key():
+        # Skipped: no file, and the summary says why.
+        crawler.pagespeed = run_pagespeed(
+            crawler.fetcher, pages, home_final,
+            limit=config.pagespeed_templates, enabled=config.pagespeed)
+        crawler.outcome.pagespeed_stats = crawler.pagespeed.summary()
         return
 
     path = os.path.join(out_dir, "pagespeed.csv")
     csv_out = StreamingCsv(path, PAGESPEED_COLUMNS)
-    try:
-        for result in run.results:
+    write_lock = threading.Lock()
+
+    def on_result(result):
+        """Called from a PageSpeed worker as each call finishes."""
+        with write_lock:
             csv_out.write(result.as_row())
             for issue_type, detail in issues_for(result):
                 page_issues.add(issue_type, result.url, result.url, detail)
+
+    try:
+        run = run_pagespeed(crawler.fetcher, pages, home_final,
+                            limit=config.pagespeed_templates,
+                            enabled=config.pagespeed, on_result=on_result)
     finally:
         csv_out.close()
+
+    crawler.pagespeed = run
+    crawler.outcome.pagespeed_stats = run.summary()
     crawler.outcome.paths["pagespeed_csv"] = path
 
 

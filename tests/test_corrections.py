@@ -10,7 +10,7 @@ from seo_audit.fetch import Fetcher
 from seo_audit.issues import PAGE_ISSUE_SEVERITY
 from seo_audit.pagespeed import (ATTEMPTS_PER_CALL, CALL_TIMEOUT,
                                  MAX_IN_FLIGHT, ENDPOINT, PageSpeedClient,
-                                 run_pagespeed)
+                                 issues_for, run_pagespeed)
 from seo_audit.scoring import (MIN_PERFORMANCE_COVERAGE, SITE_DEDUCTION_CAP,
                                ScoreBoard, load_weights, score_page,
                                site_deduction)
@@ -372,3 +372,138 @@ def test_the_sweep_keeps_the_crawl_timeout(tmp_path):
 
     assert seen
     assert all(t is None and r is None for t, r in seen)
+
+
+# --- session 7 item 2: external checks run wide ------------------------------
+
+def test_external_checks_run_in_parallel_but_report_in_priority_order(tmp_path):
+    """Eight at a time, yet the most-linked target is still reported first."""
+    import threading as _t
+    seen_concurrent = []
+    live = {"n": 0}
+    lock = _t.Lock()
+
+    from seo_audit.fetch import Fetcher as RealFetcher
+    original = RealFetcher.head
+
+    def spy(self, url, timeout=None, max_retries=None):
+        if "example.com" not in url:
+            with lock:
+                live["n"] += 1
+                seen_concurrent.append(live["n"])
+            try:
+                return original(self, url, timeout=timeout,
+                                max_retries=max_retries)
+            finally:
+                with lock:
+                    live["n"] -= 1
+        return original(self, url, timeout=timeout, max_retries=max_retries)
+
+    # dead.com is linked from three pages, the others from one each.
+    pages = {BASE + "/": page(links=[("https://dead.com/gone", "Everywhere"),
+                                     ("https://other.com/", "Once"),
+                                     ("https://partner.com/", "Once"),
+                                     ("/a", "A"), ("/b", "B")])}
+    for name in ("a", "b"):
+        pages[f"{BASE}/{name}"] = page(canonical=f"{BASE}/{name}",
+                                       links=[("https://dead.com/gone", "Ev")])
+
+    def extra(mock):
+        mock.head("https://dead.com/gone", status_code=404,
+                  headers={"Content-Type": "text/html"})
+
+    RealFetcher.head = spy
+    try:
+        run = crawl_site(tmp_path, pages, extra=extra)
+    finally:
+        RealFetcher.head = original
+
+    assert max(seen_concurrent) > 1, "external checks ran one at a time"
+    # Priority preserved: the 3-referrer target is the reported breakage.
+    broken = run.page_issues_of("external_link_broken")
+    assert [b["url"] for b in broken] == ["https://dead.com/gone"]
+    assert "linked from 3 page(s)" in broken[0]["detail"]
+
+
+def test_the_external_pool_is_eight_wide():
+    from seo_audit.crawl import EXTERNAL_CHECK_WORKERS
+    assert EXTERNAL_CHECK_WORKERS == 8
+
+
+# --- session 7 item 3: PageSpeed stage deadline and streaming ----------------
+
+def test_no_new_call_starts_after_the_stage_deadline(monkeypatch):
+    """Two URLs measured, the rest recorded as unattempted, not as healthy."""
+    import requests
+    config = make_config()
+    monkeypatch.setattr("seo_audit.pagespeed.time.sleep", lambda s: None)
+    clock = [0.0]
+
+    def fake_monotonic():
+        # Each reading moves the clock on five minutes, so the 12-minute
+        # deadline arrives after the first couple of calls and the rest are
+        # recorded as never attempted.
+        clock[0] += 300
+        return clock[0]
+
+    monkeypatch.setattr("seo_audit.pagespeed.time.monotonic", fake_monotonic)
+
+    pages = [(BASE + f"/s-{i}/p", 1, 2) for i in range(3)]
+    with requests_mock.Mocker() as mock:
+        mock.get(ENDPOINT, json=pagespeed_payload())
+        run = run_pagespeed(Fetcher(config, delay=0), pages, BASE + "/",
+                            limit=3, key="k", deadline_seconds=12 * 60)
+
+    assert run.deadline_hit is True
+    assert run.stage_seconds > 0
+    unattempted = [r for r in run.results if r.error == "stage deadline"]
+    assert unattempted, "nothing was recorded as cut off by the deadline"
+    # Every sampled URL still has a row for both strategies.
+    assert len(run.results) == 2 * len(run.samples)
+    assert run.measurements < len(run.results)
+
+
+def test_a_deadline_row_is_unmeasured_not_a_healthy_page():
+    from seo_audit.pagespeed import DEADLINE_REASON, PageSpeedResult
+    result = PageSpeedResult(url=BASE + "/", strategy="mobile",
+                             error=DEADLINE_REASON)
+    result.template, result.group_size = "/x", 5
+    found = dict(issues_for(result))
+    assert "pagespeed_error" in found
+    assert DEADLINE_REASON in found["pagespeed_error"]
+    assert PAGE_ISSUE_SEVERITY["pagespeed_error"] == "unmeasured"
+
+
+def test_pagespeed_rows_are_on_disk_before_the_stage_ends(tmp_path,
+                                                          monkeypatch):
+    """Lesson 5: a stopped stage must leave its data."""
+    monkeypatch.setenv("PAGESPEED_API_KEY", "test-key")
+    seen_during = []
+    out = tmp_path / "pagespeed.csv"
+
+    def watcher(request, context):
+        if out.exists():
+            with open(out, encoding="utf-8-sig", newline="") as fh:
+                import csv as _csv
+                seen_during.append(len(list(_csv.DictReader(fh))))
+        return pagespeed_payload()
+
+    def extra(mock):
+        mock.get(ENDPOINT, json=watcher)
+
+    run = crawl_site(tmp_path, {
+        BASE + "/": page(links=[("/blog/one", "One"), ("/blog/two", "Two")]),
+        BASE + "/blog/one": page(canonical=BASE + "/blog/one"),
+        BASE + "/blog/two": page(canonical=BASE + "/blog/two"),
+    }, extra=extra, pagespeed=True, pagespeed_templates=3)
+
+    assert len(run.pagespeed) == 2 * run.summary["pagespeed"]["templates_sampled"]
+    # Rows were already on disk while later calls were still being made.
+    assert max(seen_during) >= 1
+    assert run.summary["pagespeed"]["pagespeed_deadline_hit"] is False
+    assert run.summary["pagespeed"]["pagespeed_stage_seconds"] >= 0
+
+
+def test_the_stage_deadline_is_twelve_minutes():
+    from seo_audit.pagespeed import STAGE_DEADLINE_SECONDS
+    assert STAGE_DEADLINE_SECONDS == 12 * 60
