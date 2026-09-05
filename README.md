@@ -27,28 +27,67 @@ for the crawl.
 ## Run
 
 ```bash
-python -m seo_audit.cli --domain example.com --max-pages 40
+python -m seo_audit.cli --domain example.com
 ```
 
-Useful flags: `--sitemap URL`, `--max-depth N`, `--delay SECONDS`,
-`--include-subdomains`, `--no-robots`, `--out DIR`.
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--sitemap URL` | discovered | Skip discovery and use this sitemap. |
+| `--max-pages N` | 2000 | Pages fetched **and parsed**. Sitemap URLs beyond this are still status-checked by the sweep. |
+| `--max-depth N` | 5 | How many clicks from the homepage to follow. |
+| `--workers N` | 4 | Parallel fetchers. Each waits `--delay` between its own requests. |
+| `--delay SECONDS` | 1.0 | Politeness delay per worker. A larger robots.txt `Crawl-delay` wins. |
+| `--sitemap-reserve F` | 0.25 | Share of the page budget held back for sitemap URLs no link reached (0 to 0.5). |
+| `--include-subdomains` | off | Treat other subdomains as part of the site. |
+| `--no-robots` | off | Do not fetch or obey robots.txt. |
+| `--keep-html` | off | Also store each page's HTML, gzipped. |
+| `--out DIR` | `output/<host>/<timestamp>/` | Where the run folder goes. |
 
 With no `--sitemap`, the tool looks for `Sitemap:` lines in `robots.txt`, then
 `/sitemap.xml`, then `/sitemap_index.xml`. Sitemap index files are followed
 and gzipped sitemaps are decompressed.
 
+If the homepage redirects to a different hostname on the same site (`www` to
+non-`www` or the reverse), that hostname is adopted for the rest of the run,
+including the output folder name, and the swap is recorded as a
+`host_redirect` issue.
+
+## Crawled versus swept
+
+Two different jobs, and the difference matters when reading the output:
+
+- **Crawled** pages are fetched in full, up to `--max-pages`. They get a row
+  in `raw_crawl.csv` with response time, content type and text length.
+- **Swept** URLs are every sitemap URL the crawl did not reach. They get a
+  `HEAD` request (falling back to `GET` if the server refuses), so a sitemap
+  far larger than the page cap is still checked in full rather than sampled.
+  No HTML is fetched or stored for them.
+
+So on a site with 20,000 sitemap URLs and the default cap, 2,000 pages are
+parsed and all 20,000 are status-checked.
+
 ## Output
 
 Written to `output/<host>/<timestamp>/` unless `--out` says otherwise. Every
-run gets its own dated folder so runs of the same domain can be compared later.
+run gets its own dated folder so runs of the same domain can be compared
+later. All four files are UTF-8 with a BOM, so Excel opens them cleanly.
 
-- **`raw_crawl.csv`**: one row per URL: `url`, `final_url`, `status_code`,
-  `redirect_hops`, `response_time_ms`, `content_type`, `in_sitemap`,
-  `in_crawl`, `depth`, `discovered_from`, `text_chars`, `error`.
-  UTF-8 with a BOM, so Excel opens it without mangling accents.
-- **`crawl_summary.json`**: domain, sitemap used, pages found, counts by
-  source and status, robots findings, crawl delay applied, run duration, and
-  a `render_suspects` count.
+- **`raw_crawl.csv`**: one row per fetched URL: `url`, `final_url`,
+  `status_code`, `redirect_hops`, `response_time_ms`, `content_type`,
+  `in_sitemap`, `in_crawl`, `depth`, `discovered_from`, `text_chars`,
+  `error`. `final_url` is normalised the same way as `url`, so the two
+  columns join.
+- **`sitemap_sweep.csv`**: one row per sitemap URL the crawl did not fetch:
+  `url`, `status_code`, `final_url`, `redirect_hops`, `blocked_by_robots`,
+  `in_crawl`, `error`.
+- **`crawl_issues.csv`**: the crawlability log. One row per obstacle, with
+  `issue_type`, `url`, `referrer`, `detail` and `crawler_effect` -- one plain
+  sentence saying what a search engine does with it. Whenever the crawler
+  works around something (adopting a redirected host, folding a
+  trailing-slash redirect, skipping a blocked URL) it writes a row here
+  instead of quietly moving on.
+- **`crawl_summary.json`**: the run in numbers, including per-type issue
+  counts, the sweep totals and the depth distribution.
 
 `text_chars` is the visible text length after script/style/noscript are
 stripped. Pages under 500 characters are counted as `render_suspects`: they
@@ -57,9 +96,29 @@ HTTP. A high count means the site needs a rendering pass before page-level
 parsing is worth anything.
 
 `depth` is empty for URLs that came from the sitemap and were never reached by
-a link. The link crawl is drained first; a quarter of the page budget is held
-back for those sitemap-only URLs so coverage gaps still show up in a capped
-run.
+a link. The link crawl is drained first; a slice of the page budget
+(`--sitemap-reserve`, 25% by default) is held back for those sitemap-only
+URLs, so coverage gaps still show up in a capped run.
+
+## Keeping HTML
+
+`--keep-html` is **off by default**. A run folder holds CSVs and JSON only, so
+runs stay small enough to keep many of them side by side. Turn it on and each
+page's HTML is written to `html/<sha1 of the URL>.html.gz`, which lets a later
+analyser re-run over a past crawl without re-fetching the site. Expect the
+folder to grow by roughly the size of the site.
+
+## Housekeeping
+
+```bash
+python -m seo_audit.clean
+```
+
+Lists every run folder by host, with size and date. `--delete HOST` removes
+all but the newest run for that host, `--delete-all HOST` every run for it,
+and `--older-than DAYS` prunes across hosts by age. The newest run for a host
+is never deleted, whatever is asked, so there is always a baseline to compare
+against. Add `--yes` to skip the confirmation prompt.
 
 ## Tests
 

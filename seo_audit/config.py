@@ -21,10 +21,13 @@ class AuditConfig:
 
     domain: str
     sitemap_url: Optional[str] = None
-    max_pages: int = 200
+    max_pages: int = 2000
     max_depth: int = 5
     crawl_delay: float = 1.0
     timeout: int = 20
+    workers: int = 4
+    sitemap_reserve: float = 0.25
+    keep_html: bool = False
     user_agent: str = DEFAULT_USER_AGENT
     respect_robots: bool = True
     include_subdomains: bool = False
@@ -40,6 +43,13 @@ class AuditConfig:
                 "and check the text_chars column to see which pages need it."
             )
 
+        if not 0.0 <= self.sitemap_reserve <= 0.5:
+            raise ValueError(
+                "sitemap_reserve must be between 0.0 and 0.5, got "
+                f"{self.sitemap_reserve}")
+        if self.workers < 1:
+            raise ValueError(f"workers must be at least 1, got {self.workers}")
+
         raw = self.domain.strip()
         if "://" not in raw:
             raw = "https://" + raw
@@ -49,7 +59,19 @@ class AuditConfig:
 
         self.scheme = parsed.scheme.lower() or "https"
         self.host = parsed.netloc.lower()
+        # Kept for the record: adopt_host() may replace `host` once the
+        # homepage tells us which hostname the site actually serves.
+        self.configured_host = self.host
         self.domain = f"{self.scheme}://{self.host}"
+
+    def adopt_host(self, host: str) -> None:
+        """Switch the canonical host after a same-site homepage redirect."""
+        self.host = host.lower()
+        self.domain = f"{self.scheme}://{self.host}"
+
+    @property
+    def host_was_adopted(self) -> bool:
+        return self.host != self.configured_host
 
     @property
     def start_url(self) -> str:

@@ -36,6 +36,7 @@ class RobotsInfo:
     crawl_delay: Optional[float] = None
     sitemaps: List[str] = field(default_factory=list)
     error: Optional[str] = None
+    raw_text: str = ""
 
     def is_allowed(self, url: str) -> bool:
         """Longest matching rule wins; Allow beats Disallow at equal length."""
@@ -154,6 +155,7 @@ def fetch_robots(fetcher, config) -> RobotsInfo:
     text = body.decode("utf-8", errors="replace")
     info = parse_robots(text, config.user_agent, robots_url)
     info.status_code = status
+    info.raw_text = text
     return info
 
 
@@ -197,15 +199,20 @@ class SitemapResult:
     sitemaps_used: List[str] = field(default_factory=list)
     sitemaps_failed: List[Tuple[str, str]] = field(default_factory=list)
     source_of_sitemap: Optional[str] = None  # config | robots | guess
+    # Every sitemap URL seen, however we heard about it:
+    # (url, how_we_found_it, whether it yielded anything).
+    candidates: List[Tuple[str, str, bool]] = field(default_factory=list)
 
 
 def collect_sitemap_urls(fetcher, start_urls: List[str],
-                         max_depth: int = MAX_SITEMAP_DEPTH) -> SitemapResult:
+                         max_depth: int = MAX_SITEMAP_DEPTH,
+                         source: str = "guess") -> SitemapResult:
     """Walk sitemaps breadth-first, recursing into sitemap index files."""
     result = SitemapResult()
     seen_sitemaps = set()
     seen_urls = set()
     queue: List[Tuple[str, int]] = [(u, 0) for u in start_urls]
+    found_via = {u: source for u in start_urls}
 
     while queue and len(seen_sitemaps) < MAX_SITEMAPS:
         sitemap_url, depth = queue.pop(0)
@@ -213,15 +220,22 @@ def collect_sitemap_urls(fetcher, start_urls: List[str],
             continue
         seen_sitemaps.add(sitemap_url)
 
+        origin = found_via.get(sitemap_url, "sitemap_index")
         status, body, _ctype, error = fetcher.fetch_bytes(sitemap_url)
         if error is not None or status != 200 or not body:
             result.sitemaps_failed.append(
                 (sitemap_url, error or "HTTP " + str(status)))
+            if origin != "guess":
+                # A conventional path we merely tried is not evidence of a
+                # sitemap; one robots.txt advertises and fails to serve is.
+                result.candidates.append((sitemap_url, origin, False))
             continue
 
         xml_text = _maybe_gunzip(body).decode("utf-8", errors="replace")
         pages, children = parse_sitemap(xml_text, sitemap_url)
-        if pages or children:
+        used = bool(pages or children)
+        result.candidates.append((sitemap_url, origin, used))
+        if used:
             result.sitemaps_used.append(sitemap_url)
         for page in pages:
             normalised = normalize(page)
@@ -230,6 +244,7 @@ def collect_sitemap_urls(fetcher, start_urls: List[str],
                 result.urls.append(normalised)
         for child in children:
             if child not in seen_sitemaps:
+                found_via.setdefault(child, "sitemap_index")
                 queue.append((child, depth + 1))
     return result
 
@@ -237,19 +252,21 @@ def collect_sitemap_urls(fetcher, start_urls: List[str],
 def discover_sitemaps(fetcher, config, robots: RobotsInfo) -> SitemapResult:
     """Find the site's sitemap: configured URL, then robots, then conventions."""
     if config.sitemap_url:
-        result = collect_sitemap_urls(fetcher, [config.sitemap_url])
+        result = collect_sitemap_urls(fetcher, [config.sitemap_url],
+                                      source="config")
         result.source_of_sitemap = "config" if result.sitemaps_used else None
         return result
 
     if robots.sitemaps:
-        result = collect_sitemap_urls(fetcher, list(robots.sitemaps))
+        result = collect_sitemap_urls(fetcher, list(robots.sitemaps),
+                                      source="robots")
         if result.sitemaps_used:
             result.source_of_sitemap = "robots"
             return result
 
     guesses = [config.url_for("/sitemap.xml"),
                config.url_for("/sitemap_index.xml")]
-    result = collect_sitemap_urls(fetcher, guesses)
+    result = collect_sitemap_urls(fetcher, guesses, source="guess")
     result.source_of_sitemap = "guess" if result.sitemaps_used else None
     return result
 

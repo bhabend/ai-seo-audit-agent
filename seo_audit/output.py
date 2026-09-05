@@ -1,14 +1,20 @@
-"""Write the two deliverables: raw_crawl.csv and crawl_summary.json."""
+"""Run artefacts: streaming CSVs plus the summary JSON.
+
+Rows are written as they complete, not gathered and dumped at the end, so
+memory stays flat on a 2,000-page crawl and a crash leaves the rows that had
+already finished. Nothing but CSV and JSON lands in a run folder unless
+--keep-html is asked for.
+"""
 
 from __future__ import annotations
 
 import csv
+import gzip
+import hashlib
 import json
 import os
 from collections import Counter
-from typing import Any, Dict
-
-from .crawl import CrawlOutcome
+from typing import Any, Dict, List, Optional
 
 CSV_COLUMNS = [
     "url",
@@ -25,85 +31,167 @@ CSV_COLUMNS = [
     "error",
 ]
 
+SWEEP_COLUMNS = [
+    "url",
+    "status_code",
+    "final_url",
+    "redirect_hops",
+    "blocked_by_robots",
+    "in_crawl",
+    "error",
+]
+
 # Below this many visible characters a page is almost certainly a JS shell.
 RENDER_SUSPECT_THRESHOLD = 500
 
 
-def write_raw_crawl_csv(outcome: CrawlOutcome, path: str) -> str:
-    """One row per URL. utf-8-sig so Excel opens it without mangling accents."""
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", newline="", encoding="utf-8-sig") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
-        writer.writeheader()
-        for record in outcome.records:
-            writer.writerow({
-                "url": record.url,
-                "final_url": record.final_url or "",
-                "status_code": record.status_code
-                if record.status_code is not None else "",
-                "redirect_hops": record.redirect_hops,
-                "response_time_ms": record.response_time_ms
-                if record.response_time_ms is not None else "",
-                "content_type": record.content_type or "",
-                "in_sitemap": record.in_sitemap,
-                "in_crawl": record.in_crawl,
-                "depth": record.depth if record.depth is not None else "",
-                "discovered_from": record.discovered_from or "",
-                "text_chars": record.text_chars
-                if record.text_chars is not None else "",
-                "error": record.error or "",
-            })
-    return path
+class StreamingCsv:
+    """A CSV that is open for the length of the run and flushed per row."""
+
+    def __init__(self, path: str, columns: List[str]):
+        self.path = path
+        self.columns = columns
+        self.rows_written = 0
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        self._handle = open(path, "w", newline="", encoding="utf-8-sig")
+        self._writer = csv.DictWriter(self._handle, fieldnames=columns,
+                                      extrasaction="ignore")
+        self._writer.writeheader()
+        self._handle.flush()
+
+    def write(self, row: Dict[str, Any]) -> None:
+        self._writer.writerow({c: _cell(row.get(c)) for c in self.columns})
+        self.rows_written += 1
+        self._handle.flush()
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
 
-def build_summary(outcome: CrawlOutcome) -> Dict[str, Any]:
-    """The run in numbers: what was found, from where, and what looks wrong."""
-    records = outcome.records
+def _cell(value: Any) -> Any:
+    """Empty string for missing values; everything else as-is."""
+    return "" if value is None else value
+
+
+class CrawlStats:
+    """Running counters, so the summary never needs the rows back."""
+
+    def __init__(self) -> None:
+        self.pages = 0
+        self.status_counts: Counter = Counter()
+        self.depth_counts: Counter = Counter()
+        self.errors = 0
+        self.non_html = 0
+        self.redirected = 0
+        self.render_suspects = 0
+        self.both = 0
+        self.sitemap_only = 0
+        self.crawl_only = 0
+        self.render_examples: List[Dict[str, Any]] = []
+        self.max_depth_reached = -1
+
+    def add(self, row: Dict[str, Any]) -> None:
+        self.pages += 1
+        status = row.get("status_code")
+        self.status_counts[str(status) if status is not None else "no_response"] += 1
+        depth = row.get("depth")
+        self.depth_counts[depth if depth is not None else "sitemap_only"] += 1
+        if isinstance(depth, int):
+            self.max_depth_reached = max(self.max_depth_reached, depth)
+        if row.get("error"):
+            self.errors += 1
+        elif row.get("text_chars") is None:
+            self.non_html += 1
+        if row.get("redirect_hops"):
+            self.redirected += 1
+
+        text_chars = row.get("text_chars")
+        if text_chars is not None and text_chars < RENDER_SUSPECT_THRESHOLD:
+            self.render_suspects += 1
+            if len(self.render_examples) < 5:
+                self.render_examples.append(
+                    {"url": row["url"], "text_chars": text_chars})
+
+        in_sitemap, in_crawl = row.get("in_sitemap"), row.get("in_crawl")
+        if in_sitemap and in_crawl:
+            self.both += 1
+        elif in_sitemap:
+            self.sitemap_only += 1
+        elif in_crawl:
+            self.crawl_only += 1
+
+
+class HtmlStore:
+    """Gzipped page HTML, written only when --keep-html is passed."""
+
+    def __init__(self, run_dir: str, enabled: bool):
+        self.enabled = enabled
+        self.dir = os.path.join(run_dir, "html")
+        self.files_written = 0
+        if enabled:
+            os.makedirs(self.dir, exist_ok=True)
+
+    def save(self, url: str, html: Optional[str]) -> None:
+        if not self.enabled or not html:
+            return
+        name = hashlib.sha1(url.encode("utf-8")).hexdigest() + ".html.gz"
+        with gzip.open(os.path.join(self.dir, name), "wt",
+                       encoding="utf-8") as handle:
+            handle.write(html)
+        self.files_written += 1
+
+
+def build_summary(outcome) -> Dict[str, Any]:
+    """The run in numbers: what was found, from where, and what got in the way."""
+    stats = outcome.stats
     robots = outcome.robots
     sitemap = outcome.sitemap
-
-    status_counts = Counter(
-        str(r.status_code) if r.status_code is not None else "no_response"
-        for r in records
-    )
-    render_suspects = [
-        r for r in records
-        if r.text_chars is not None and r.text_chars < RENDER_SUSPECT_THRESHOLD
-    ]
-    both = sum(1 for r in records if r.in_sitemap and r.in_crawl)
-    sitemap_only = sum(1 for r in records if r.in_sitemap and not r.in_crawl)
-    crawl_only = sum(1 for r in records if r.in_crawl and not r.in_sitemap)
+    config = outcome.config
 
     return {
-        "domain": outcome.config.domain,
-        "host": outcome.config.host,
+        "domain": config.domain,
+        "host": config.host,
+        "configured_host": config.configured_host,
+        "host_adopted": config.host_was_adopted,
         "started_at": outcome.started_at,
         "run_duration_seconds": outcome.duration_seconds,
         "limits": {
-            "max_pages": outcome.config.max_pages,
-            "max_depth": outcome.config.max_depth,
-            "include_subdomains": outcome.config.include_subdomains,
-            "respect_robots": outcome.config.respect_robots,
+            "max_pages": config.max_pages,
+            "max_depth": config.max_depth,
+            "workers": config.workers,
+            "sitemap_reserve": config.sitemap_reserve,
+            "include_subdomains": config.include_subdomains,
+            "respect_robots": config.respect_robots,
+            "keep_html": config.keep_html,
         },
-        "pages_found": len(records),
+        "pages_found": stats.pages,
         "by_source": {
-            "in_sitemap_and_crawl": both,
-            "sitemap_only": sitemap_only,
-            "crawl_only": crawl_only,
+            "in_sitemap_and_crawl": stats.both,
+            "sitemap_only": stats.sitemap_only,
+            "crawl_only": stats.crawl_only,
         },
-        "status_counts": dict(sorted(status_counts.items())),
-        "errors": sum(1 for r in records if r.error),
-        "non_html": sum(1 for r in records if r.text_chars is None and not r.error),
-        "redirected": sum(1 for r in records if r.redirect_hops > 0),
+        "status_counts": dict(sorted(stats.status_counts.items())),
+        "depth_counts": {str(k): v for k, v in sorted(
+            stats.depth_counts.items(), key=lambda kv: str(kv[0]))},
+        "max_depth_reached": (stats.max_depth_reached
+                              if stats.max_depth_reached >= 0 else None),
+        "errors": stats.errors,
+        "non_html": stats.non_html,
+        "redirected": stats.redirected,
         "render_suspects": {
             "threshold_text_chars": RENDER_SUSPECT_THRESHOLD,
-            "count": len(render_suspects),
-            "share_of_pages": round(len(render_suspects) / len(records), 3)
-            if records else 0.0,
-            "examples": [
-                {"url": r.url, "text_chars": r.text_chars}
-                for r in render_suspects[:5]
-            ],
+            "count": stats.render_suspects,
+            "share_of_pages": round(stats.render_suspects / stats.pages, 3)
+            if stats.pages else 0.0,
+            "examples": stats.render_examples,
         },
         "robots": {
             "found": bool(robots and robots.found),
@@ -112,7 +200,7 @@ def build_summary(outcome: CrawlOutcome) -> Dict[str, Any]:
             "disallow_rules": len(robots.disallow) if robots else 0,
             "crawl_delay_declared": robots.crawl_delay if robots else None,
             "sitemap_directives": list(robots.sitemaps) if robots else [],
-            "urls_blocked": len(outcome.robots_blocked),
+            "urls_blocked": outcome.robots_blocked_count,
         },
         "sitemap": {
             "source": sitemap.source_of_sitemap if sitemap else None,
@@ -123,22 +211,21 @@ def build_summary(outcome: CrawlOutcome) -> Dict[str, Any]:
             ],
             "urls_in_sitemap": len(sitemap.urls) if sitemap else 0,
         },
+        "sitemap_sweep": {
+            "checked": outcome.sweep_checked,
+            "already_crawled": outcome.sweep_already_crawled,
+            "blocked_by_robots": outcome.sweep_blocked,
+            "status_counts": dict(sorted(outcome.sweep_status_counts.items())),
+        },
+        "crawl_issues": outcome.issue_counts,
+        "crawl_issues_total": sum(outcome.issue_counts.values()),
         "crawl_delay_applied_seconds": outcome.crawl_delay_applied,
+        "html_files_kept": outcome.html_files_kept,
     }
 
 
-def write_summary_json(outcome: CrawlOutcome, path: str) -> str:
+def write_summary_json(outcome, path: str) -> str:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(build_summary(outcome), handle, indent=2, ensure_ascii=False)
     return path
-
-
-def write_all(outcome: CrawlOutcome, out_dir: str) -> Dict[str, str]:
-    """Write both artefacts into `out_dir` and return their paths."""
-    os.makedirs(out_dir, exist_ok=True)
-    csv_path = os.path.join(out_dir, "raw_crawl.csv")
-    json_path = os.path.join(out_dir, "crawl_summary.json")
-    write_raw_crawl_csv(outcome, csv_path)
-    write_summary_json(outcome, json_path)
-    return {"raw_crawl_csv": csv_path, "crawl_summary_json": json_path}

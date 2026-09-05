@@ -12,11 +12,14 @@ Lessons from v0 designed out here:
 from __future__ import annotations
 
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 import requests
+
+from .urlnorm import normalize
 
 HTML_CONTENT_TYPES = ("text/html", "application/xhtml+xml")
 
@@ -43,6 +46,7 @@ class FetchResult:
     text_chars: Optional[int] = None
     error: Optional[str] = None
     content: Optional[bytes] = None
+    redirect_loop: bool = False
 
     @property
     def redirect_hops(self) -> int:
@@ -123,30 +127,79 @@ def is_html_content_type(content_type: Optional[str]) -> bool:
 
 
 class Fetcher:
-    """Wraps a single requests.Session for the whole run."""
+    """HTTP access for the whole run, one Session per worker thread.
+
+    A requests.Session is not safe to drive from several threads at once, so
+    each thread gets its own and the crawl delay is enforced per thread: every
+    worker waits `crawl_delay` between its own requests, which is what a
+    politeness delay is supposed to mean once there is more than one worker.
+    """
+
+    REQUEST_HEADERS = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en",
+    }
 
     def __init__(self, config, session: Optional[requests.Session] = None,
-                 max_retries: int = 2, backoff: float = 1.0):
+                 max_retries: int = 2, backoff: float = 1.0,
+                 delay: Optional[float] = None):
         self.config = config
         self.max_retries = max_retries
         self.backoff = backoff
-        self.session = session or requests.Session()
-        self.session.headers.update({
-            "User-Agent": config.user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en",
-        })
+        self.delay = config.crawl_delay if delay is None else delay
+        self._shared_session = session  # injected by tests; shared on purpose
+        self._local = threading.local()
+        self._sessions: List[requests.Session] = []
+        self._sessions_lock = threading.Lock()
 
-    def _request(self, url: str, stream: bool = False):
-        """One GET with backoff on transport errors only, never on 4xx/5xx."""
+    def _new_session(self) -> requests.Session:
+        session = requests.Session()
+        session.headers.update(self.REQUEST_HEADERS)
+        session.headers["User-Agent"] = self.config.user_agent
+        with self._sessions_lock:
+            self._sessions.append(session)
+        return session
+
+    @property
+    def session(self) -> requests.Session:
+        """This thread's Session, created on first use."""
+        if self._shared_session is not None:
+            return self._shared_session
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = self._new_session()
+            self._local.session = session
+        return session
+
+    def set_delay(self, delay: float) -> None:
+        """Used once robots.txt has been read and may have raised the delay."""
+        self.delay = delay
+
+    def _wait_turn(self) -> None:
+        """Hold this worker back until its own delay has elapsed."""
+        if self.delay <= 0:
+            return
+        last = getattr(self._local, "last_request", None)
+        if last is not None:
+            remaining = self.delay - (time.monotonic() - last)
+            if remaining > 0:
+                time.sleep(remaining)
+        self._local.last_request = time.monotonic()
+
+    def _request(self, url: str, method: str = "GET"):
+        """One request with backoff on transport errors only, never on 4xx/5xx."""
         last_error = None
         for attempt in range(self.max_retries + 1):
+            self._wait_turn()
             try:
-                return self.session.get(
+                return self.session.request(
+                    method,
                     url,
                     timeout=self.config.timeout,
                     allow_redirects=True,
                 ), None
+            except requests.exceptions.TooManyRedirects as exc:
+                return None, f"TooManyRedirects: {exc}"
             except (requests.exceptions.ConnectionError,
                     requests.exceptions.Timeout,
                     requests.exceptions.ChunkedEncodingError) as exc:
@@ -166,10 +219,13 @@ class Fetcher:
 
         if response is None:
             result.error = error or "unknown request failure"
+            result.redirect_loop = bool(error and "TooManyRedirects" in error)
             return result
 
         result.status_code = response.status_code
-        result.final_url = response.url
+        # Normalised so it joins against the `url` column: no :443, no
+        # fragment, no tracking params. The raw hops are kept below.
+        result.final_url = normalize(response.url) or response.url
         result.redirect_chain = [(h.url, h.status_code) for h in response.history]
         result.content_type = response.headers.get("Content-Type")
 
@@ -186,6 +242,36 @@ class Fetcher:
             result.error = f"decode failed: {type(exc).__name__}: {exc}"
         return result
 
+    def head(self, url: str) -> FetchResult:
+        """Status-only check for the sitemap sweep. No body, no HTML, no store.
+
+        Falls back to GET when the server rejects HEAD (405/501) or answers
+        without saying what it served.
+        """
+        result = FetchResult(url=url)
+        started = time.perf_counter()
+        response, error = self._request(url, method="HEAD")
+
+        needs_get = (
+            response is None
+            or response.status_code in (405, 501)
+            or not response.headers.get("Content-Type")
+        )
+        if needs_get and error is None:
+            response, error = self._request(url, method="GET")
+
+        result.response_time_ms = int((time.perf_counter() - started) * 1000)
+        if response is None:
+            result.error = error or "unknown request failure"
+            result.redirect_loop = bool(error and "TooManyRedirects" in error)
+            return result
+
+        result.status_code = response.status_code
+        result.final_url = normalize(response.url) or response.url
+        result.redirect_chain = [(h.url, h.status_code) for h in response.history]
+        result.content_type = response.headers.get("Content-Type")
+        return result
+
     def fetch_bytes(self, url: str) -> Tuple[Optional[int], Optional[bytes],
                                              Optional[str], Optional[str]]:
         """Raw fetch for robots.txt and sitemaps.
@@ -199,4 +285,7 @@ class Fetcher:
                 response.headers.get("Content-Type"), None)
 
     def close(self) -> None:
-        self.session.close()
+        with self._sessions_lock:
+            for session in self._sessions:
+                session.close()
+            self._sessions.clear()

@@ -4,42 +4,48 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
-import time
 
 from .config import AuditConfig
-from .crawl import crawl
-from .output import build_summary, write_all
+from .crawl import run_crawl
+from .output import build_summary
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="seo-audit",
-        description="Crawl a site and write a raw crawl CSV plus a JSON summary.",
+        description="Crawl a site and write the raw crawl, the sitemap sweep, "
+                    "the crawlability log and a JSON summary.",
     )
     parser.add_argument("--domain", required=True,
                         help="Site to crawl, e.g. example.com or https://example.com")
     parser.add_argument("--sitemap", default=None,
                         help="Sitemap URL. Optional: robots.txt and the usual "
                              "conventional paths are tried when omitted.")
-    parser.add_argument("--max-pages", type=int, default=200)
+    parser.add_argument("--max-pages", type=int, default=2000,
+                        help="Pages to fetch and parse (default 2000). Every "
+                             "sitemap URL beyond this is still status-checked.")
     parser.add_argument("--max-depth", type=int, default=5)
+    parser.add_argument("--workers", type=int, default=4,
+                        help="Parallel fetchers (default 4). Each one waits "
+                             "--delay between its own requests.")
     parser.add_argument("--delay", type=float, default=1.0,
-                        help="Seconds between requests (default 1.0). A larger "
-                             "robots.txt Crawl-delay wins.")
+                        help="Seconds between requests per worker (default "
+                             "1.0). A larger robots.txt Crawl-delay wins.")
+    parser.add_argument("--sitemap-reserve", type=float, default=0.25,
+                        help="Share of the page budget held back for sitemap "
+                             "URLs no link reached, 0 to 0.5 (default 0.25).")
     parser.add_argument("--timeout", type=int, default=20)
     parser.add_argument("--no-robots", action="store_true",
                         help="Do not fetch or obey robots.txt.")
     parser.add_argument("--include-subdomains", action="store_true",
                         help="Treat other subdomains as part of the site.")
+    parser.add_argument("--keep-html", action="store_true",
+                        help="Also store each page's HTML gzipped under "
+                             "html/. Off by default: runs stay small.")
     parser.add_argument("--out", default=None,
                         help="Output directory (default output/<host>/<timestamp>/)")
     return parser
-
-
-def default_out_dir(host: str) -> str:
-    return os.path.join("output", host, time.strftime("%Y%m%d-%H%M%S"))
 
 
 def main(argv=None) -> int:
@@ -50,23 +56,27 @@ def main(argv=None) -> int:
         sitemap_url=args.sitemap,
         max_pages=args.max_pages,
         max_depth=args.max_depth,
+        workers=args.workers,
         crawl_delay=args.delay,
+        sitemap_reserve=args.sitemap_reserve,
         timeout=args.timeout,
         respect_robots=not args.no_robots,
         include_subdomains=args.include_subdomains,
+        keep_html=args.keep_html,
     )
 
-    out_dir = args.out or default_out_dir(config.host)
     print(f"Crawling {config.domain} (max {config.max_pages} pages, "
-          f"depth {config.max_depth})...", file=sys.stderr)
+          f"depth {config.max_depth}, {config.workers} workers)...",
+          file=sys.stderr)
 
-    outcome = crawl(config)
-    paths = write_all(outcome, out_dir)
-    summary = build_summary(outcome)
+    outcome = run_crawl(config, out_dir=args.out)
+    print(json.dumps(build_summary(outcome), indent=2, ensure_ascii=False))
 
-    print(json.dumps(summary, indent=2, ensure_ascii=False))
-    print(f"\nraw crawl : {paths['raw_crawl_csv']}", file=sys.stderr)
-    print(f"summary   : {paths['crawl_summary_json']}", file=sys.stderr)
+    for label, key in (("raw crawl    ", "raw_crawl_csv"),
+                       ("sitemap sweep", "sitemap_sweep_csv"),
+                       ("crawl issues ", "crawl_issues_csv"),
+                       ("summary      ", "crawl_summary_json")):
+        print(f"{label}: {outcome.paths[key]}", file=sys.stderr)
     return 0
 
 

@@ -1,8 +1,11 @@
 """Fetch layer: decoding, redirect history, non-HTML (lessons 1-3)."""
 
+import threading
+
 import requests
 import requests_mock
 
+import seo_audit.fetch as fetch_module
 from conftest import BASE, make_config
 from seo_audit.fetch import Fetcher
 
@@ -117,3 +120,74 @@ def test_server_error_is_not_retried():
 
     assert result.status_code == 500
     assert attempts == 1
+
+
+# --- decision A1: final_url is normalised so it joins against `url` ---------
+
+def test_final_url_is_normalised_like_the_url_column():
+    """A default port, a fragment or a utm tag must not leak into final_url."""
+    config = make_config()
+    with requests_mock.Mocker() as mock:
+        mock.get(BASE + "/old", status_code=301,
+                 headers={"Location": "https://example.com:443/new?utm_source=x"})
+        mock.get("https://example.com:443/new?utm_source=x",
+                 text="<html><body>arrived</body></html>",
+                 headers={"Content-Type": "text/html; charset=utf-8"})
+        result = Fetcher(config).fetch(BASE + "/old")
+
+    assert result.final_url == BASE + "/new"
+    assert ":443" not in result.final_url
+    # The raw hops are kept exactly as the server sent them.
+    assert result.redirect_chain == [(BASE + "/old", 301)]
+
+
+# --- decision B: one Session per worker, delay honoured per worker ----------
+
+def test_each_thread_gets_its_own_session():
+    config = make_config()
+    fetcher = Fetcher(config)
+    seen = []
+
+    def grab():
+        seen.append(id(fetcher.session))
+
+    threads = [threading.Thread(target=grab) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(set(seen)) == 3  # three threads, three Sessions
+    assert id(fetcher.session) not in seen  # and one more for this thread
+    fetcher.close()
+
+
+def test_each_worker_waits_its_own_delay_between_its_own_requests(monkeypatch):
+    """The delay is per worker, so it throttles a thread, not the whole pool."""
+    config = make_config(crawl_delay=2.0)
+    slept = []
+    clock = {"now": 0.0}
+
+    monkeypatch.setattr(fetch_module.time, "sleep",
+                        lambda s: (slept.append(round(s, 3)),
+                                   clock.__setitem__("now", clock["now"] + s)))
+    monkeypatch.setattr(fetch_module.time, "monotonic", lambda: clock["now"])
+
+    with requests_mock.Mocker() as mock:
+        mock.get(BASE + "/a", text="<html><body>a</body></html>",
+                 headers={"Content-Type": "text/html"})
+        fetcher = Fetcher(config, delay=2.0)
+        fetcher.fetch(BASE + "/a")   # first request on this thread: no wait
+        fetcher.fetch(BASE + "/a")   # second: the full delay
+        clock["now"] += 0.5
+        fetcher.fetch(BASE + "/a")   # 0.5s already elapsed, so 1.5s left
+
+    assert slept == [2.0, 1.5]
+
+
+def test_robots_crawl_delay_can_raise_the_fetcher_delay():
+    config = make_config(crawl_delay=1.0)
+    fetcher = Fetcher(config)
+    assert fetcher.delay == 1.0
+    fetcher.set_delay(5.0)
+    assert fetcher.delay == 5.0

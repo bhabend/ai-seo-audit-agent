@@ -153,6 +153,28 @@ def is_same_site(url: str, host: str, include_subdomains: bool = False) -> bool:
     return False
 
 
+def slash_variant(url: str) -> Optional[str]:
+    """The same URL with its trailing slash toggled, or None if not applicable.
+
+    `/x` <-> `/x/`. The site root has no variant: `/` toggled is not a URL.
+    """
+    if not url:
+        return None
+    parts = urlsplit(url)
+    path = parts.path
+    if not path or path == "/":
+        return None
+    flipped = path[:-1] if path.endswith("/") else path + "/"
+    if not flipped:
+        return None
+    return urlunsplit((parts.scheme, parts.netloc, flipped, parts.query, ""))
+
+
+def is_slash_variant(a: str, b: str) -> bool:
+    """True when two URLs differ only by a trailing slash."""
+    return bool(a and b and slash_variant(a) == b)
+
+
 def extract_links(html: str, base_url: str) -> Iterable[str]:
     """Absolute, normalised hrefs from every <a> in `html` (order preserved)."""
     from bs4 import BeautifulSoup
