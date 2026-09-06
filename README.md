@@ -276,6 +276,55 @@ punish a page for being the one that was measured while its identical
 siblings scored full marks. Performance is scored once instead, as the site
 score's 15% component.
 
+## findings.json
+
+The eighth file in a run folder, computed by code from the run's own seven
+files after everything else has finished. It is what a report is written
+from: sections for `meta`, `headline`, `crawlability`,
+`indexability_technical`, `on_page`, `content`, `schema`, `links`,
+`performance`, `prioritised_fixes`, `search_performance` and `comparison`.
+
+Three conventions make it safe to draw from:
+
+- **Every share is an object**: `{"count": 167, "whole": 604, "whole_is":
+  "pages parsed"}`. Nothing can be turned into a percentage or a pie without
+  stating what it is a share of, and no capped number can pass as a total.
+- **Faults are grouped by root cause.** Forty 404s under
+  `/on-demand/<city>/?area=` are one finding that names how many link
+  instances it accounts for, not forty rows. The pattern is derived from each
+  URL -- its first path segment, its depth, and the *names* of its query
+  parameters -- so it carries no knowledge of any particular site. Faults
+  that travel with a parameter rather than a section, such as non-reciprocal
+  hreflang on `?mlg=0` variants, are grouped by parameter instead.
+- **A fact is stated once.** Orphan pages appear in `links.orphan_pages` with
+  their sitemap split, and nowhere else.
+
+`prioritised_fixes` holds up to 15 entries ordered by reach times severity
+(high 3, medium 2, low 1; `unmeasured` never becomes a fix). A root-cause
+group counts as one fix. Each carries a plain-language title, the pages
+affected with their whole, five evidence rows, and a `fix_scope` of
+`template`, `config` or `page`.
+
+The file is bounded: five evidence rows per finding, fifteen fixes, no page
+text.
+
+### Comparing runs
+
+Every run compares itself against **the newest other complete run for the
+same host** and records the result in `comparison`: deltas for pages found
+and parsed, sitemap size, site score, mobile performance, orphans, broken
+internal targets and broken external links, plus per-issue-type counts of
+what is new, resolved and unchanged. Anything that moved by more than 20% or
+50 units lands in `notable` — a sitemap that quietly fell from 709 URLs to
+106 between two runs is exactly what this is for.
+
+Older run folders were written by earlier versions and are missing keys. A
+metric the previous run never recorded is reported as `"not in previous
+run"`, never as a change: two versions of the tool are not two states of a
+site.
+
+`--compare-to PATH` picks a specific folder; `--no-compare` switches it off.
+
 ## What gets parsed, and what a check is keyed on
 
 **Only pages the crawl fetched and that answered 200 are parsed.** A 404 body

@@ -35,6 +35,8 @@ class AuditConfig:
     write_links: bool = False
     pagespeed_templates: int = 15
     pagespeed: bool = True
+    compare_to: Optional[str] = None
+    compare: bool = True
     user_agent: str = DEFAULT_USER_AGENT
     respect_robots: bool = True
     include_subdomains: bool = False

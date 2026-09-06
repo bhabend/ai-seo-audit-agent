@@ -20,6 +20,7 @@ import os
 import time
 import threading
 from collections import Counter, deque
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -29,6 +30,7 @@ from .config import AuditConfig
 from .discovery import (RobotsInfo, SitemapResult, discover_sitemaps,
                         effective_crawl_delay, fetch_robots)
 from .fetch import Fetcher, is_html_content_type
+from .findings import build_findings
 from .issues import (DEEP_PAGE_DEPTH, RENDER_SUSPECT_CHARS, SLOW_DOCUMENT_MS,
                      SLOW_RESPONSE_MS, IssueLog, PageIssueLog,
                      ai_crawler_groups)
@@ -83,6 +85,9 @@ class CrawlOutcome:
     sweep_throttled: bool = False
     sweep_throttled_responses: int = 0
     redirect_duplicates: int = 0
+    stage_seconds: Dict[str, float] = field(default_factory=dict)
+    findings_written: bool = False
+    findings_error: Optional[str] = None
     link_stats: Dict[str, int] = field(default_factory=dict)
     content_stats: Dict[str, int] = field(default_factory=dict)
     pagespeed_stats: Dict = field(default_factory=dict)
@@ -96,6 +101,16 @@ class CrawlOutcome:
     duration_seconds: float = 0.0
     started_at: Optional[str] = None
     paths: Dict[str, str] = field(default_factory=dict)
+
+
+@contextmanager
+def _stage(outcome: CrawlOutcome, name: str):
+    """Record how long one stage took, however it ends."""
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        outcome.stage_seconds[name] = round(time.perf_counter() - started, 2)
 
 
 def _host_of(url: str) -> str:
@@ -587,18 +602,38 @@ def run_crawl(config: AuditConfig, out_dir: Optional[str] = None,
 
             # Phase 3: sweep every sitemap URL the crawl did not fetch.
             _sweep(crawler, sitemap_urls, sweep_csv, executor, chunk_size)
+        outcome.stage_seconds["crawl"] = round(time.perf_counter() - started, 2)
 
         # --- after the crawl: checks that need more than one page ---
-        _run_link_and_content_checks(crawler, page_issues, pages_csv, out_dir)
-        _run_cross_page_checks(crawler, page_issues)
-        _run_site_level_checks(crawler, page_issues, home_row, home_headers)
-        _run_pagespeed(crawler, page_issues, out_dir)
+        # Each stage is timed: an eight-minute middle stage was a black box
+        # for three sessions because nothing recorded where the time went.
+        with _stage(outcome, "graph_and_content"):
+            _run_link_and_content_checks(crawler, page_issues, pages_csv,
+                                         out_dir)
+        # The external checks ran inside that stage; keep the numbers
+        # disjoint so they sum to the wall time.
+        outcome.stage_seconds["graph_and_content"] = round(
+            outcome.stage_seconds["graph_and_content"]
+            - outcome.stage_seconds.get("external_checks", 0.0), 2)
+
+        with _stage(outcome, "cross_page"):
+            _run_cross_page_checks(crawler, page_issues)
+        outcome.stage_seconds["cross_page"] = round(
+            outcome.stage_seconds["cross_page"]
+            - outcome.stage_seconds.get("canonical_checks", 0.0), 2)
+        with _stage(outcome, "site_level"):
+            _run_site_level_checks(crawler, page_issues, home_row,
+                                   home_headers)
+        with _stage(outcome, "pagespeed"):
+            _run_pagespeed(crawler, page_issues, out_dir)
 
         # Every finding is in now, so the pages can be scored and the file
         # finished in one pass.
         page_issues.close()
         pages_csv.close()
-        _finalise_pages(crawler, pages_csv.path, paths["page_issues_csv"])
+        with _stage(outcome, "scoring"):
+            _finalise_pages(crawler, pages_csv.path,
+                            paths["page_issues_csv"])
 
         outcome.html_files_kept = html_store.files_written
         outcome.issue_counts = issues.counts()
@@ -614,6 +649,22 @@ def run_crawl(config: AuditConfig, out_dir: Optional[str] = None,
         if own_fetcher:
             fetcher.close()
 
+    write_summary_json(outcome, paths["crawl_summary_json"])
+
+    # findings reads the run's own files, so it runs after the summary is on
+    # disk, and its own timing is folded back into that summary.
+    with _stage(outcome, "findings"):
+        try:
+            build_findings(
+                out_dir,
+                previous_dir=config.compare_to,
+                compare_enabled=config.compare)
+            outcome.findings_written = True
+            outcome.paths["findings_json"] = os.path.join(out_dir,
+                                                          "findings.json")
+        except Exception as exc:  # a findings failure must not lose the run
+            outcome.findings_written = False
+            outcome.findings_error = f"{type(exc).__name__}: {exc}"
     write_summary_json(outcome, paths["crawl_summary_json"])
     return outcome
 
@@ -816,10 +867,14 @@ def _run_cross_page_checks(crawler: _Crawler,
     """Checks over the pages already crawled. Never re-fetches a known URL."""
     checked = {"count": 0}
 
+    spent = {"seconds": 0.0}
+
     def head_check(url: str) -> Optional[int]:
         """Only ever called for a canonical target the crawl never saw."""
         checked["count"] += 1
+        started = time.perf_counter()
         result = crawler.fetcher.head(url)
+        spent["seconds"] += time.perf_counter() - started
         return result.status_code
 
     unchecked = 0
@@ -830,6 +885,8 @@ def _run_cross_page_checks(crawler: _Crawler,
             unchecked += 1
         page_issues.add(issue_type, url, final_url, detail)
     crawler.outcome.canonical_targets_unchecked = unchecked
+    crawler.outcome.stage_seconds["canonical_checks"] = round(
+        spent["seconds"], 2)
 
 
 def _run_site_level_checks(crawler: _Crawler, page_issues: PageIssueLog,
@@ -953,6 +1010,7 @@ def _run_link_and_content_checks(crawler: _Crawler, page_issues: PageIssueLog,
         return crawler.fetcher.head(target, timeout=EXTERNAL_CHECK_TIMEOUT,
                                     max_retries=0)
 
+    external_started = time.perf_counter()
     if checked:
         # Someone else's uptime, on our clock: these are independent of each
         # other and of the audited site, so they run wide. executor.map keeps
@@ -971,6 +1029,8 @@ def _run_link_and_content_checks(crawler: _Crawler, page_issues: PageIssueLog,
                         f"{'no response' if status is None else 'HTTP ' + str(status)}, "
                         f"{describe_referrers(crawler.graph.external_targets[target])}")
 
+    external_seconds = round(time.perf_counter() - external_started, 2)
+    outcome.stage_seconds["external_checks"] = external_seconds
     outcome.redirect_duplicates = crawler.redirect_duplicates
     outcome.link_stats = {
         "pages_with_zero_inlinks": zero_inlinks,

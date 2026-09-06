@@ -96,7 +96,8 @@ def test_keep_html_is_off_by_default_and_writes_no_html_dir(tmp_path):
     assert run.summary["html_files_kept"] == 0
     assert sorted(os.listdir(run.out_dir)) == [
         "audit_pages.csv", "crawl_issues.csv", "crawl_summary.json",
-        "page_issues.csv", "raw_crawl.csv", "sitemap_sweep.csv"]
+        "findings.json", "page_issues.csv", "raw_crawl.csv",
+        "sitemap_sweep.csv"]
 
 
 def test_keep_html_on_writes_one_gzip_per_page(tmp_path):

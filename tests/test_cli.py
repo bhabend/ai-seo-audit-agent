@@ -18,6 +18,8 @@ def test_flags_reach_the_parser():
     assert args.sweep_limit == 10000
     assert args.sweep_delay == 0.25
     assert args.canonical_check_limit == 500
+    assert args.compare_to is None
+    assert args.no_compare is False
     assert args.external_check_limit == 1000
     assert args.pagespeed_templates == 15
     assert args.no_pagespeed is False
@@ -37,7 +39,8 @@ def test_cli_writes_every_artefact_and_prints_the_summary(tmp_path, capsys):
     assert code == 0
     assert sorted(os.listdir(str(tmp_path))) == [
         "audit_pages.csv", "crawl_issues.csv", "crawl_summary.json",
-        "page_issues.csv", "raw_crawl.csv", "sitemap_sweep.csv"]
+        "findings.json", "page_issues.csv", "raw_crawl.csv",
+        "sitemap_sweep.csv"]
 
     summary = json.loads(capsys.readouterr().out)
     assert summary["pages_found"] == 2

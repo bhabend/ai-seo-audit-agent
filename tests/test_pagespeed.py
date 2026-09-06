@@ -233,7 +233,8 @@ def test_pagespeed_csv_is_the_seventh_file_with_two_rows_per_url(tmp_path,
 
     files = sorted(os.listdir(run.out_dir))
     assert "pagespeed.csv" in files
-    assert len(files) == 7
+    assert "findings.json" in files
+    assert len(files) == 8
 
     sampled = {r["url"] for r in run.pagespeed}
     assert len(run.pagespeed) == 2 * len(sampled)
@@ -251,8 +252,10 @@ def test_a_skipped_stage_leaves_six_files_and_an_explained_summary(tmp_path):
     import os
     run = crawl_site(tmp_path, {BASE + "/": page()}, pagespeed=False)
 
-    assert len(os.listdir(run.out_dir)) == 6
+    # No pagespeed.csv when the stage is skipped, but findings still lands.
+    assert len(os.listdir(run.out_dir)) == 7
     assert "pagespeed.csv" not in os.listdir(run.out_dir)
+    assert "findings.json" in os.listdir(run.out_dir)
     ps = run.summary["pagespeed"]
     assert ps["skipped"] is True
     assert ps["calls_made"] == 0

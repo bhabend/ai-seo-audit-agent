@@ -65,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
                              "32 calls. Needs PAGESPEED_API_KEY in .env.")
     parser.add_argument("--no-pagespeed", action="store_true",
                         help="Skip the performance sample entirely.")
+    parser.add_argument("--compare-to", default=None, metavar="PATH",
+                        help="Run folder to compare this run against. "
+                             "Defaults to the newest other complete run for "
+                             "the same host.")
+    parser.add_argument("--no-compare", action="store_true",
+                        help="Do not compare against a previous run.")
     parser.add_argument("--timeout", type=int, default=20)
     parser.add_argument("--no-robots", action="store_true",
                         help="Do not fetch or obey robots.txt.")
@@ -98,6 +104,8 @@ def main(argv=None) -> int:
         write_links=args.write_links,
         pagespeed_templates=args.pagespeed_templates,
         pagespeed=not args.no_pagespeed,
+        compare_to=args.compare_to,
+        compare=not args.no_compare,
         timeout=args.timeout,
         respect_robots=not args.no_robots,
         include_subdomains=args.include_subdomains,
@@ -115,6 +123,7 @@ def main(argv=None) -> int:
                        ("audit pages  ", "audit_pages_csv"),
                        ("page issues  ", "page_issues_csv"),
                        ("pagespeed   ", "pagespeed_csv"),
+                       ("findings    ", "findings_json"),
                        ("sitemap sweep", "sitemap_sweep_csv"),
                        ("crawl issues ", "crawl_issues_csv"),
                        ("summary      ", "crawl_summary_json")):

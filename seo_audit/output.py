@@ -227,6 +227,7 @@ def build_summary(outcome) -> Dict[str, Any]:
             "include_subdomains": config.include_subdomains,
             "respect_robots": config.respect_robots,
             "keep_html": config.keep_html,
+            "pagespeed_templates": config.pagespeed_templates,
         },
         "pages_found": stats.pages,
         "by_source": {
@@ -250,6 +251,8 @@ def build_summary(outcome) -> Dict[str, Any]:
             "examples": stats.render_examples,
         },
         "pages_parsed": stats.pages_parsed,
+        "stage_seconds": outcome.stage_seconds,
+        "findings_written": outcome.findings_written,
         "redirect_duplicates": outcome.redirect_duplicates,
         "canonical_targets_unchecked": outcome.canonical_targets_unchecked,
         "canonical_check_limit": config.canonical_check_limit,

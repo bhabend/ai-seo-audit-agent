@@ -281,7 +281,7 @@ def test_write_links_is_off_by_default(tmp_path):
     run = crawl_site(tmp_path, {BASE + "/": linked([("/a", "A")]),
                                 BASE + "/a": linked([])})
     assert "links.csv" not in os.listdir(run.out_dir)
-    assert len(os.listdir(run.out_dir)) == 6
+    assert len(os.listdir(run.out_dir)) == 7
 
 
 def test_write_links_writes_the_edge_list(tmp_path):
