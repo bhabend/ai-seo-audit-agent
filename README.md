@@ -325,6 +325,59 @@ site.
 
 `--compare-to PATH` picks a specific folder; `--no-compare` switches it off.
 
+## The report
+
+```bash
+python -m seo_audit.report --run output/example.com/20260101-120000
+```
+
+Builds a Word document from a finished run folder and validates it before
+exiting. The audit itself is never re run: the report reads `findings.json`
+and the other files that are already there.
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--run PATH` | required | The run folder to report on. |
+| `--model NAME` | `gpt-5-mini` | Model for the narrative. |
+| `--no-ai` | off | Write the narrative from templates. No API calls, no cost. |
+
+**Cost.** At most **14 calls per report**, one per section plus the executive
+summary, roughly 40k input and 8k output tokens, about **two cents** on
+gpt-5-mini. A 429 or a server error is retried once. A 401, 402, 403 or an
+`insufficient_quota` body stops the run immediately: it is neither retried
+nor quietly downgraded to another model. Every call's tokens are summed into
+`report_usage.json` alongside the model name.
+
+**Numbers come from code, prose comes from the model.** The model is handed
+one section of `findings.json` and nothing else, never a raw CSV, and three
+guards run on whatever it returns:
+
+1. **Dashes are removed.** Em dashes, en dashes and hyphens used with spaces
+   become commas or full stops. Hyphens inside words and URLs are data and
+   stay.
+2. **Every number must already be in that section.** Any sentence carrying a
+   figure that is not in the data is dropped and replaced with a templated
+   sentence built from the section's own counts. Each drop is recorded in
+   `report_usage.json` under `guard_events`, so you can see where the model
+   was overruled rather than trusting that it was.
+3. **Length is capped** per section, because a section that runs long buries
+   the finding.
+
+**Charts are drawn by code**, in memory, and no image files are left in the
+run folder. Every chart that shows a part of a whole is a pie whose title
+states that whole in words, for example "Structured data coverage, of 842
+pages parsed". The one exception is a bar chart of performance scores by
+template, which is not a share of anything.
+
+**The document is validated before the command exits.** It is reopened and
+checked for headings in order, the expected number of images, no dash used as
+punctuation anywhere including table cells, no empty section, no placeholder
+text, every pie title stating its whole, and a file under 2 MB. Any failure
+names the failing check and exits non zero.
+
+Output lands next to the run: `SEO_Audit_<host>_<date>.docx` and
+`report_usage.json`.
+
 ## What gets parsed, and what a check is keyed on
 
 **Only pages the crawl fetched and that answered 200 are parsed.** A 404 body

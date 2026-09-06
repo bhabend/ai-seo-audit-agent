@@ -44,6 +44,11 @@ RUN_FILES = ("raw_crawl.csv", "audit_pages.csv", "page_issues.csv",
              "crawl_summary.json")
 
 _MISSING = "not in previous run"
+NOT_COMPARABLE = "not comparable, coverage changed"
+
+# Metrics that describe how much of the site the crawl saw, rather than a
+# fault count. A change in these explains changes in everything else.
+COVERAGE_METRICS = {"pages_found", "pages_parsed", "sitemap_urls_total"}
 
 
 # --- reading ----------------------------------------------------------------
@@ -748,8 +753,37 @@ def _prioritised_fixes(page_issues: List[Dict],
                 "patterns": patterns,
             })
 
-    candidates.sort(key=lambda c: (-(c["reach"] * c["weight"]),
+    # A3: impact is how many pages a fix touches, weighted by severity.
+    # Multiplying by link instances let one low-severity redirect pattern with
+    # 9,564 inbound links outrank every real defect on the site.
+    for c in candidates:
+        c["impact"] = len(c["rows"]) * c["weight"]
+    candidates.sort(key=lambda c: (-c["impact"], -c["reach"],
                                    c["issue_type"], c["pattern"] or ""))
+
+    # A2: one entry per issue type in the list. Sibling patterns of the same
+    # type are merged under the biggest, with their patterns named in the
+    # evidence, so a single fault does not fill four of the top five slots.
+    merged: List[Dict] = []
+    seen_types: Dict[str, Dict] = {}
+    for c in candidates:
+        first = seen_types.get(c["issue_type"])
+        if first is None:
+            c["sibling_patterns"] = []
+            seen_types[c["issue_type"]] = c
+            merged.append(c)
+            continue
+        if c["pattern"]:
+            first["sibling_patterns"].append({
+                "pattern": c["pattern"],
+                "pages_affected": len(c["rows"]),
+                "reach": c["reach"],
+            })
+        first["rows"] = first["rows"] + c["rows"]
+        first["reach"] += c["reach"]
+        first["impact"] = len(first["rows"]) * first["weight"]
+    candidates = sorted(merged, key=lambda c: (-c["impact"], -c["reach"],
+                                               c["issue_type"]))
 
     fixes = []
     for index, c in enumerate(candidates[:MAX_FIXES], start=1):
@@ -763,7 +797,9 @@ def _prioritised_fixes(page_issues: List[Dict],
             "pattern": c["pattern"],
             "pages_affected": share(pages_affected, parsed, "pages parsed"),
             "reach": c["reach"],
-            "impact": c["reach"] * c["weight"],
+            "impact": c["impact"],
+            "sibling_patterns": c.get("sibling_patterns", [])[:MAX_EVIDENCE],
+            "pattern_count": 1 + len(c.get("sibling_patterns", [])),
             "fix_scope": _fix_scope(c["issue_type"], c["patterns"],
                                     pages_affected),
             "evidence": _evidence(c["rows"], "final_url", "url", "detail"),
@@ -841,7 +877,9 @@ def compare(run_dir: str, previous_dir: Optional[str] = None) -> Dict:
         if current is None:
             deltas[name] = {"now": None, "previous": before, "change": None}
             continue
-        change = current - before
+        # A1: one decimal. A raw float subtraction printed
+        # "-1.2000000000000028" into a client-facing document.
+        change = round(current - before, 1)
         deltas[name] = {"now": current, "previous": before, "change": change}
         moved_enough = (abs(change) >= NOTABLE_ABSOLUTE
                         or (before and abs(change) / abs(before) >= NOTABLE_RATIO))
@@ -867,9 +905,28 @@ def compare(run_dir: str, previous_dir: Optional[str] = None) -> Dict:
     for issue_type, _url in now_keys & old_keys:
         by_type[issue_type]["unchanged"] += 1
 
+    # A4: when the crawl saw a different amount of the site, count movements
+    # are not the site changing. Orphans "rose" 56 to 169 between two runs
+    # only because the sitemap recovered from 106 URLs to 709.
+    coverage_changed = False
+    for metric in ("sitemap_urls_total", "pages_found"):
+        entry = deltas.get(metric) or {}
+        before, change = entry.get("previous"), entry.get("change")
+        if isinstance(before, (int, float)) and isinstance(change, (int, float)):
+            if before and abs(change) / abs(before) > NOTABLE_RATIO:
+                coverage_changed = True
+
+    if coverage_changed:
+        for item in notable:
+            if item["metric"] in COVERAGE_METRICS:
+                item["note"] = "coverage changed, this is the crawl seeing "                                "more or less of the site"
+            else:
+                item["note"] = NOT_COMPARABLE
+
     return {
         "previous_run": os.path.basename(os.path.normpath(previous_dir)),
         "previous_run_path": previous_dir,
+        "coverage_changed": coverage_changed,
         "deltas": deltas,
         "notable": sorted(notable, key=lambda n: -abs(n["change"])),
         "issue_counts": dict(sorted(by_type.items())),
