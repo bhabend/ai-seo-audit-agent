@@ -101,17 +101,18 @@ def test_the_guard_logs_the_drop_and_falls_back_to_the_template(tmp_path):
     section = {"pages": {"count": 40, "whole": 842, "whole_is": "pages"}}
     with requests_mock.Mocker() as mock:
         mock.post(API_URL, json=completion(
-            "Exactly 123456 pages are broken."))
+            '{"found": "Exactly 123456 pages are broken.", '
+            '"why": "It matters.", "todo": ["Fix it."]}'))
         narrator = Narrator(key="k", session=requests.Session())
         text = narrator.write("links", section)
 
-    assert "123456" not in text
-    assert narrator.usage.guard_events
-    event = narrator.usage.guard_events[0]
+    assert "123456" not in text["found"]
+    event = [e for e in narrator.usage.guard_events
+             if "sentences_dropped" in e][0]
     assert event["section"] == "links"
     assert event["sentences_dropped"] == 1
-    # The templated replacement states the real figure instead.
-    assert "40 of 842" in text
+    # The replacement states the real figure instead.
+    assert "40 of 842" in text["found"]
 
 
 # --- calls, retries, refusals ------------------------------------------------
@@ -121,11 +122,13 @@ def test_a_rate_limit_is_retried_once(monkeypatch):
     with requests_mock.Mocker() as mock:
         mock.post(API_URL, [{"status_code": 429, "text": "slow down"},
                             {"status_code": 200,
-                             "json": completion("All is well.")}])
+                             "json": completion(
+                                 '{"found": "All is well.", '
+                                 '"why": "B.", "todo": ["C."]}')}])
         narrator = Narrator(key="k", session=requests.Session())
         text = narrator.write("on_page", {"a": 1})
 
-    assert "All is well." in text
+    assert "All is well." in text["found"]
     assert narrator.usage.calls == 2
 
 
@@ -151,16 +154,23 @@ def test_an_insufficient_quota_body_stops_without_retry(monkeypatch):
     assert narrator.usage.calls == 1
 
 
-def test_the_call_ceiling_is_enforced():
+def test_the_call_ceiling_degrades_to_templates_rather_than_failing():
+    """Out of budget must not lose the report: the rest is written from data."""
     narrator = Narrator(key="k", session=requests.Session())
     narrator.usage.calls = MAX_CALLS
-    with pytest.raises(NarrativeError, match="ceiling"):
-        narrator.write("on_page", {"a": 1})
+    parts = narrator.write("on_page", {"a": 1})
+
+    assert parts["found"], "the section still says something"
+    assert any(e.get("reason") == "call ceiling reached"
+               for e in narrator.usage.guard_events)
+    assert narrator.usage.calls == MAX_CALLS, "no further calls were made"
 
 
-def test_a_whole_report_never_exceeds_fourteen_calls(run_dir):
+def test_a_whole_report_never_exceeds_the_call_ceiling(run_dir):
     with requests_mock.Mocker() as mock:
-        mock.post(API_URL, json=completion("A plain sentence about the site."))
+        mock.post(API_URL, json=completion(
+            '{"found": "A plain sentence about the site.", '
+            '"why": "It matters here.", "todo": ["Do the thing."]}'))
         result = generate(run_dir, use_ai=True, session=requests.Session())
 
     usage = result["usage_data"]
@@ -282,7 +292,7 @@ def test_a_coverage_change_is_stated_plainly(tmp_path):
     text = " ".join(p.text for p in document.paragraphs)
     assert "Comparison with the previous audit" in [
         p.text for p in document.paragraphs]
-    assert "not directly comparable" in text
+    assert "not comparable with each other" in text
 
 
 # --- validation --------------------------------------------------------------
@@ -381,7 +391,10 @@ def test_a2_one_entry_per_issue_type_with_siblings_merged(tmp_path):
     fix = fixes[0]
     assert fix["pattern_count"] == 3
     assert len(fix["sibling_patterns"]) == 2
-    assert fix["pages_affected"]["count"] == 9
+    # A redirect target is a target, so the nine rows are nine targets and
+    # the pages affected are the pages linking to them.
+    assert fix["targets"]["count"] == 9
+    assert fix["pages_affected"]["whole_is"] == "pages parsed"
 
 
 def test_a3_impact_is_pages_times_severity_not_link_instances(tmp_path):
@@ -439,7 +452,10 @@ def test_a4_a_coverage_change_marks_counts_not_comparable(tmp_path):
     assert orphans[0]["note"] == "not comparable, coverage changed"
     sitemap = [n for n in result["notable"]
                if n["metric"] == "sitemap_urls_total"][0]
-    assert "coverage changed" in sitemap["note"]
+    # The sitemap is the site's own, so it is attributed to the site, not
+    # written off as a coverage wobble.
+    assert sitemap["attribution"] == "site"
+    assert "the site's sitemap listed 106 URLs last time" in sitemap["note"]
 
 
 # --- regressions caught by the first live report -----------------------------

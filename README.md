@@ -341,9 +341,11 @@ and the other files that are already there.
 | `--model NAME` | `gpt-5-mini` | Model for the narrative. |
 | `--no-ai` | off | Write the narrative from templates. No API calls, no cost. |
 
-**Cost.** At most **14 calls per report**, one per section plus the executive
-summary, roughly 40k input and 8k output tokens, about **two cents** on
-gpt-5-mini. A 429 or a server error is retried once. A 401, 402, 403 or an
+**Cost.** At most **16 calls per report**: one per section, one for the
+executive summary, and up to five regenerations of sections the model cut
+off. Each call is capped at 2500 completion tokens and asks for low reasoning
+effort. About **three to five cents** on gpt-5-mini. Running out of budget
+never loses the report: the remaining sections are written from the data. A 429 or a server error is retried once. A 401, 402, 403 or an
 `insufficient_quota` body stops the run immediately: it is neither retried
 nor quietly downgraded to another model. Every call's tokens are summed into
 `report_usage.json` alongside the model name.
@@ -352,16 +354,49 @@ nor quietly downgraded to another model. Every call's tokens are summed into
 one section of `findings.json` and nothing else, never a raw CSV, and three
 guards run on whatever it returns:
 
-1. **Dashes are removed.** Em dashes, en dashes and hyphens used with spaces
-   become commas or full stops. Hyphens inside words and URLs are data and
-   stay.
+1. **Dashes are removed.** Em dashes, en dashes, hyphens used with spaces and
+   bullet markers at the start of a line become commas or full stops. Hyphens
+   inside words and URLs are data and stay.
 2. **Every number must already be in that section.** Any sentence carrying a
-   figure that is not in the data is dropped and replaced with a templated
-   sentence built from the section's own counts. Each drop is recorded in
-   `report_usage.json` under `guard_events`, so you can see where the model
-   was overruled rather than trusting that it was.
-3. **Length is capped** per section, because a section that runs long buries
+   figure that is not in the data is dropped, and **the finding it described
+   is restated from the data**, naming the issue and its examples. A dropped
+   sentence must never lose a finding. Each drop is recorded in
+   `report_usage.json` under `guard_events` with the issues restated.
+3. **A cut off answer is regenerated once.** If the model reports it ran out
+   of room, or a paragraph or action item does not end in punctuation, the
+   section is asked for again. If it is still incomplete the templated
+   section is used, and both are logged.
+4. **Length is capped** per section, because a section that runs long buries
    the finding.
+
+**Sections have a shape.** Each asks the model for three parts and renders
+them as three: a "What we found" paragraph, a "Why it matters" paragraph, and
+"What to do" as a numbered list. The model is told never to define a term and
+never to describe how anything was measured, because a **glossary written by
+code** sits right after the executive summary and does the defining once.
+
+**Identifiers never reach the page.** Every issue type carries a plain label
+("page title missing", not `title_missing`) and a one sentence finding. The
+data handed to the model is curated first: internal keys such as fingerprints
+and thresholds are stripped, and identifiers are swapped for their labels, so
+the model cannot repeat one back even if it wanted to.
+
+**A count says what it counts.** A fix affecting broken links reports both the
+pages that link to them and the targets themselves, because "118 of 842 pages"
+was never 118 pages. Fix scope is `one setting`, `one template` or `page by
+page`, decided by whether the affected pages share a URL shape.
+
+**A canonical that consolidates is not a fault.** A filtered or tracked
+address naming its clean page is the site doing the right thing; it is
+reported as such and never offered as a fix. Only a canonical pointing at a
+genuinely different page is.
+
+**A sitemap that changes size is the site changing.** When the sitemap or the
+page count moves more than 20% between audits, the comparison section is
+written entirely by code: it attributes the sitemap change to the site, states
+plainly that the counts either side are not comparable, and suggests checking
+why the sitemap size varies. The model is not asked to narrate a change it
+would turn into a story about decline.
 
 **Charts are drawn by code**, in memory, and no image files are left in the
 run folder. Every chart that shows a part of a whole is a pie whose title

@@ -27,13 +27,18 @@ from collections import Counter, defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlsplit
 
+from .issues import label_of, plain_finding, unit_of
 from .pagespeed import template_of
 
 MAX_EVIDENCE = 5
 MAX_FIXES = 15
 
 # How much a finding's severity multiplies its reach when ordering fixes.
-SEVERITY_WEIGHT = {"high": 3, "medium": 2, "low": 1, "unmeasured": 0}
+# Weight 0 means the type is reported but never offered as a fix. "info" is
+# for things the site is doing right, such as a filtered address correctly
+# pointing at its clean page.
+SEVERITY_WEIGHT = {"high": 3, "medium": 2, "low": 1, "unmeasured": 0,
+                   "info": 0}
 
 # A metric has moved enough to be worth naming when it shifts by either.
 NOTABLE_RATIO = 0.20
@@ -539,6 +544,20 @@ def _links(summary: Dict, issues_by_type: Dict[str, List[Dict]],
     }
 
 
+def _round_ms(value: Any) -> Optional[int]:
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _round_to(value: Any, places: int) -> Optional[float]:
+    try:
+        return round(float(value), places)
+    except (TypeError, ValueError):
+        return None
+
+
 def _performance(summary: Dict, pagespeed: List[Dict],
                  pages: List[Dict], parsed: int) -> Dict:
     block = _dig(summary, "pagespeed", default={}) or {}
@@ -563,9 +582,10 @@ def _performance(summary: Dict, pagespeed: List[Dict],
             if mobile.get("performance_score") else None,
             "desktop_score": _int(desktop.get("performance_score"), None)
             if desktop.get("performance_score") else None,
-            "lab_lcp_ms": mobile.get("lab_lcp_ms") or None,
-            "lab_cls": mobile.get("lab_cls") or None,
-            "field_inp_ms": mobile.get("field_inp_ms") or None,
+            # Milliseconds to whole numbers and layout shift to two places:
+            # "2026.005 milliseconds" is not a sentence anyone should read.
+            "lab_lcp_ms": _round_ms(mobile.get("lab_lcp_ms")),
+            "lab_cls": _round_to(mobile.get("lab_cls"), 2),
             "field_data_level": mobile.get("field_data_level"),
             "error": mobile.get("error") or desktop.get("error") or None,
         })
@@ -579,8 +599,23 @@ def _performance(summary: Dict, pagespeed: List[Dict],
                   for t, c in all_templates.most_common()
                   if t not in sampled_templates]
 
+    inp_values = [_round_ms(r.get("field_inp_ms")) for r in pagespeed
+                  if r.get("strategy") == "mobile" and r.get("field_inp_ms")]
+    inp_values = [v for v in inp_values if v is not None]
+    origin_level = any(r.get("field_data_level") == "origin"
+                       for r in pagespeed)
+
     return {
         "skipped": False,
+        # Real visitor responsiveness, stated once for the report rather than
+        # repeated on every template row.
+        "field_inp": {
+            "measured_templates": len(inp_values),
+            "worst_ms": max(inp_values) if inp_values else None,
+            "median_ms": sorted(inp_values)[len(inp_values) // 2]
+            if inp_values else None,
+            "origin_level": origin_level,
+        },
         "templates_measured": measured,
         "templates_sampled": block.get("templates_sampled", 0),
         "pages_represented": share(block.get("pages_represented", 0), parsed,
@@ -704,18 +739,80 @@ def _title_for(issue_type: str) -> str:
     return title.replace("-", " ").replace("  ", " ")
 
 
-def _fix_scope(issue_type: str, patterns: int, pages: int) -> str:
-    if issue_type in SITE_LEVEL_TYPES:
+TEMPLATE_CONCENTRATION = 0.7
+
+
+def _fix_scope(issue_type: str, rows: List[Dict]) -> str:
+    """Where the work happens: one setting, one template, or page by page.
+
+    A fault on 280 pages that all share one URL shape is one template edit,
+    not 280 page edits. The old rule only said "template" when a group had
+    exactly one pattern, which almost never held for ungrouped types.
+    """
+    if unit_of(issue_type) == "site" or issue_type in SITE_LEVEL_TYPES:
         return "config"
-    if patterns == 1 and pages > 1:
+    if not rows:
+        return "page"
+    patterns = Counter(pattern_of(r.get("final_url") or r.get("url") or "")
+                       for r in rows)
+    top = patterns.most_common(1)[0][1]
+    if len(rows) > 1 and top / len(rows) >= TEMPLATE_CONCENTRATION:
         return "template"
     return "page"
 
 
+def _affected_share(candidate: Dict, pages_affected: int, parsed: int,
+                    totals: Dict[str, int]) -> Dict:
+    """How many pages a fix touches. For target types that is the pages that
+    link to the broken thing, not the number of broken things."""
+    if unit_of(candidate["issue_type"]) == "target":
+        # A detail line names at most five referrers, so counting named ones
+        # undercounts. The largest single target's referrer count is a lower
+        # bound on distinct referring pages and never overstates.
+        named = set()
+        for row in candidate["rows"]:
+            named.update(_referrers_named(row.get("detail", "")))
+        biggest = max((_referrer_count(r.get("detail", ""))
+                       for r in candidate["rows"]), default=0)
+        count = max(len(named), biggest)
+        return share(min(count, parsed) or min(pages_affected, parsed),
+                     parsed, "pages parsed")
+    return share(pages_affected, parsed, "pages parsed")
+
+
+def _targets_share(candidate: Dict, totals: Dict[str, int]) -> Optional[Dict]:
+    """For a target type, the second number: broken things out of things
+    checked. "118 of 842 pages" was 118 external links, not 118 pages."""
+    issue_type = candidate["issue_type"]
+    if unit_of(issue_type) != "target":
+        return None
+    count = len(candidate["rows"])
+    if issue_type == "external_link_broken":
+        return share(count, totals.get("external_checked", count) or count,
+                     "links to other websites checked")
+    return share(count, totals.get("internal_targets", count) or count,
+                 "internal link targets found")
+
+
+_REFERRER_LIST_RE = re.compile(r"linked from \d+ page\(s\): (.+)$")
+
+
+def _referrers_named(detail: str) -> List[str]:
+    """The referring pages a link finding names, as far as it lists them."""
+    match = _REFERRER_LIST_RE.search(detail or "")
+    if not match:
+        return []
+    listed = match.group(1)
+    listed = re.sub(r",\s*and \d+ more.*$", "", listed)
+    return [u.strip() for u in listed.split(",") if u.strip().startswith("http")]
+
+
 def _prioritised_fixes(page_issues: List[Dict],
                        severities: Dict[str, str],
-                       parsed: int) -> List[Dict]:
+                       parsed: int, totals: Optional[Dict[str, int]] = None
+                       ) -> List[Dict]:
     """Up to 15 fixes, ordered by reach times severity. A group is one fix."""
+    totals = totals or {}
     by_type: Dict[str, List[Dict]] = defaultdict(list)
     for row in page_issues:
         by_type[row["issue_type"]].append(row)
@@ -795,13 +892,21 @@ def _prioritised_fixes(page_issues: List[Dict],
             "category": _category_of(c["issue_type"]),
             "severity": c["severity"],
             "pattern": c["pattern"],
-            "pages_affected": share(pages_affected, parsed, "pages parsed"),
+            "label": label_of(c["issue_type"]),
+            "unit": unit_of(c["issue_type"]),
+            "plain_finding": plain_finding(
+                c["issue_type"],
+                c["reach"] if unit_of(c["issue_type"]) == "target"
+                else pages_affected,
+                parsed),
+            "pages_affected": _affected_share(c, pages_affected, parsed,
+                                              totals),
+            "targets": _targets_share(c, totals),
             "reach": c["reach"],
             "impact": c["impact"],
             "sibling_patterns": c.get("sibling_patterns", [])[:MAX_EVIDENCE],
             "pattern_count": 1 + len(c.get("sibling_patterns", [])),
-            "fix_scope": _fix_scope(c["issue_type"], c["patterns"],
-                                    pages_affected),
+            "fix_scope": _fix_scope(c["issue_type"], c["rows"]),
             "evidence": _evidence(c["rows"], "final_url", "url", "detail"),
         })
     return fixes
@@ -916,17 +1021,35 @@ def compare(run_dir: str, previous_dir: Optional[str] = None) -> Dict:
             if before and abs(change) / abs(before) > NOTABLE_RATIO:
                 coverage_changed = True
 
+    sitemap_delta = deltas.get("sitemap_urls_total") or {}
+    sitemap_changed = (isinstance(sitemap_delta.get("change"), (int, float))
+                       and sitemap_delta.get("change"))
+
+    for item in notable:
+        if item["metric"] == "sitemap_urls_total":
+            # The site's own sitemap, not our crawl. Saying otherwise blamed
+            # the crawler for the client's instability.
+            item["attribution"] = "site"
+            item["note"] = (
+                f"the site's sitemap listed {item['previous']} URLs last time "
+                f"and {item['now']} now")
+        elif coverage_changed:
+            item["attribution"] = "coverage"
+            item["note"] = NOT_COMPARABLE
+
     if coverage_changed:
-        for item in notable:
-            if item["metric"] in COVERAGE_METRICS:
-                item["note"] = "coverage changed, this is the crawl seeing "                                "more or less of the site"
-            else:
-                item["note"] = NOT_COMPARABLE
+        # New and resolved counts are a function of how much was crawled, so
+        # they say nothing while coverage is moving.
+        notable = [n for n in notable
+                   if n["metric"] == "sitemap_urls_total"
+                   or n["metric"] not in COVERAGE_METRICS]
 
     return {
         "previous_run": os.path.basename(os.path.normpath(previous_dir)),
         "previous_run_path": previous_dir,
         "coverage_changed": coverage_changed,
+        "sitemap_changed": bool(sitemap_changed),
+        "issue_counts_comparable": not coverage_changed,
         "deltas": deltas,
         "notable": sorted(notable, key=lambda n: -abs(n["change"])),
         "issue_counts": dict(sorted(by_type.items())),
@@ -968,8 +1091,13 @@ def build_findings(run_dir: str, previous_dir: Optional[str] = None,
         "schema": _schema(summary, issues_by_type, pages, parsed),
         "links": _links(summary, issues_by_type, parsed),
         "performance": _performance(summary, pagespeed, pages, parsed),
-        "prioritised_fixes": _prioritised_fixes(page_issues,
-                                                PAGE_ISSUE_SEVERITY, parsed),
+        "prioritised_fixes": _prioritised_fixes(
+            page_issues, PAGE_ISSUE_SEVERITY, parsed,
+            totals={
+                "external_checked": _dig(summary, "links", "external_checked",
+                                         default=0),
+                "internal_targets": _dig(summary, "links", "edges", default=0),
+            }),
         "search_performance": {"provided": False},
         "comparison": (compare(run_dir, previous_dir) if compare_enabled
                        else {"previous_run": None}),

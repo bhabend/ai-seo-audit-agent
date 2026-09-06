@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from .parse import PageFields
 from .schema import SchemaResult
@@ -28,6 +28,22 @@ TITLE_MAX = 60
 TITLE_MIN = 20
 META_DESCRIPTION_MAX = 160
 THIN_PAGE_WORDS = 200
+
+
+def _consolidates_variant(final_url: str, canonical: str) -> bool:
+    """True when the canonical is this same page with fewer query parameters.
+
+    `/a/?product=x` naming `/a/` is consolidation working as intended.
+    `/a/` naming `/b/`, or naming another host, is not.
+    """
+    here, there = urlsplit(final_url), urlsplit(canonical)
+    if (here.scheme, here.netloc, here.path) != (there.scheme, there.netloc,
+                                                 there.path):
+        return False
+    here_params = {k for k, _v in parse_qsl(here.query, keep_blank_values=True)}
+    there_params = {k for k, _v in parse_qsl(there.query,
+                                             keep_blank_values=True)}
+    return bool(here_params) and there_params < here_params
 
 
 def check_page(fields: PageFields, schema: SchemaResult,
@@ -70,8 +86,17 @@ def check_page(fields: PageFields, schema: SchemaResult,
             found.append(("canonical_not_absolute",
                           f"relative canonical {fields.canonical_raw!r}"))
         if fields.canonical != final_url:
-            found.append(("canonical_off_page",
-                          f"canonical points to {fields.canonical}"))
+            if _consolidates_variant(final_url, fields.canonical):
+                # Same page, fewer parameters: the site is folding a filtered
+                # or tracked address back into its clean one, which is
+                # correct. Telling a client to undo this is bad advice.
+                found.append((
+                    "canonical_consolidates_variant",
+                    f"this filtered or tracked address correctly points back "
+                    f"to {fields.canonical}"))
+            else:
+                found.append(("canonical_off_page",
+                              f"canonical points to {fields.canonical}"))
 
     if not fields.viewport:
         found.append(("viewport_missing", "no viewport meta tag"))

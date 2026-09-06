@@ -24,6 +24,7 @@ import sys
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
+from .issues import label_of, unit_of
 from .narrative import Narrator, strip_dashes
 
 # Section order in the document. The key is the findings section it reads.
@@ -45,6 +46,40 @@ APPENDIX_ROWS = 20
 # Real unfilled placeholders. A bare "{" is not one: template names such as
 # "/workspaces/{slug}" are data this product produces on purpose.
 PLACEHOLDERS = ("TODO", "lorem ipsum", "{{", "}}", "{0}", "{}")
+
+# Written by code, after the executive summary, so the narrative never has to
+# stop and define a word mid sentence.
+GLOSSARY = [
+    ("Sitemap", "A file listing the pages a site wants search engines to "
+     "know about."),
+    ("Robots file", "A file at the root of a site telling search engines "
+     "which addresses they may fetch."),
+    ("Redirect", "An instruction sending a visitor from one address to "
+     "another."),
+    ("Preferred address", "The address a page names as the one it wants "
+     "search engines to list, also called a canonical."),
+    ("Hidden from search", "A page carrying an instruction that asks search "
+     "engines not to list it, also called noindex."),
+    ("Orphan page", "A page no other page on the site links to."),
+    ("Internal link", "A link from one page of the site to another."),
+    ("Structured data", "Extra machine readable notes in a page describing "
+     "what it is about, used for richer search results."),
+    ("Schema", "The shared vocabulary structured data is written in."),
+    ("Language version", "An alternate page for another language or region, "
+     "declared with hreflang."),
+    ("Secure connection enforced", "A setting telling browsers to reach the "
+     "site only over a secure connection, also called HSTS."),
+    ("Core Web Vitals", "Google's three measures of how a page feels to "
+     "use: loading, stability and responsiveness."),
+    ("Largest contentful paint", "How long the main thing on the page takes "
+     "to appear."),
+    ("Cumulative layout shift", "How much the page moves about while it "
+     "loads."),
+    ("Interaction to next paint", "How quickly the page responds when "
+     "someone taps or clicks."),
+    ("Template", "A page layout shared by many pages, such as every blog "
+     "post or every location page."),
+]
 
 
 # --- charts -----------------------------------------------------------------
@@ -104,6 +139,13 @@ def pie_title(label: str, whole: int, whole_is: str) -> str:
     return f"{label}, of {whole} {whole_is}"
 
 
+def _sitemap_title(whole: int, crawled: int, not_crawled: int) -> str:
+    """Spell the whole out: two different things are being added together."""
+    word = "URL" if not_crawled == 1 else "URLs"
+    return (f"Sitemap coverage, of {whole} URLs seen ({crawled} crawled plus "
+            f"{not_crawled} sitemap {word} not crawled)")
+
+
 def build_charts(findings: Dict) -> Dict[str, Any]:
     """Every chart the document can carry, keyed by the section it belongs to."""
     charts: Dict[str, Any] = {}
@@ -154,10 +196,8 @@ def build_charts(findings: Dict) -> Dict[str, Any]:
                   ("Crawled, not in the sitemap", both.get("count", 0)),
                   ("In the sitemap, not crawled",
                    not_crawled.get("count", 0))],
-                 pie_title("Sitemap coverage", whole,
-                           "pages found and sitemap URLs")),
-            pie_title("Sitemap coverage", whole,
-                      "pages found and sitemap URLs"))
+                 _sitemap_title(whole, found, not_crawled.get("count", 0))),
+            _sitemap_title(whole, found, not_crawled.get("count", 0)))
 
     redirects = crawl.get("redirects") or {}
     total = (redirects.get("total") or {}).get("count", 0)
@@ -206,10 +246,101 @@ def _add_table(document, columns: List[str], rows: List[List[str]]):
     return table
 
 
+def _add_section_body(document, parts: Dict) -> None:
+    """What we found, why it matters, what to do, as three visible parts.
+
+    Session 8 rendered each section as one wall of text and every "what to do"
+    ran into the paragraph before it.
+    """
+    found = (parts.get("found") or "").strip()
+    why = (parts.get("why") or "").strip()
+    todo = [t for t in (parts.get("todo") or []) if str(t).strip()]
+
+    if found:
+        paragraph = document.add_paragraph()
+        paragraph.add_run("What we found. ").bold = True
+        paragraph.add_run(strip_dashes(found))
+    if why:
+        paragraph = document.add_paragraph()
+        paragraph.add_run("Why it matters. ").bold = True
+        paragraph.add_run(strip_dashes(why))
+    if todo:
+        paragraph = document.add_paragraph()
+        paragraph.add_run("What to do.").bold = True
+        for item in todo:
+            document.add_paragraph(strip_dashes(str(item)),
+                                   style="List Number")
+
+
+def _add_glossary(document) -> None:
+    document.add_heading("Terms used in this report", level=1)
+    document.add_paragraph(strip_dashes(
+        "A few words appear throughout. They are set out here once so the "
+        "sections that follow can get on with the findings."))
+    for term, meaning in GLOSSARY:
+        paragraph = document.add_paragraph()
+        paragraph.add_run(f"{term}. ").bold = True
+        paragraph.add_run(strip_dashes(meaning))
+
+
 def _add_chart(document, chart):
     from docx.shared import Inches
     buffer, _title = chart
     document.add_picture(buffer, width=Inches(CHART_WIDTH_INCHES))
+
+
+def _add_comparison(document, comparison: Dict, narrator: Narrator) -> None:
+    """When coverage moved, this section is written by code, not the model.
+
+    A sitemap that went from 106 URLs to 709 is the site changing, not the
+    crawler wobbling, and counts either side of that are not comparable. A
+    model asked to narrate it will reach for a story about decline, so it is
+    not asked.
+    """
+    sitemap = (comparison.get("deltas") or {}).get("sitemap_urls_total") or {}
+    coverage_changed = comparison.get("coverage_changed")
+
+    if coverage_changed:
+        if comparison.get("sitemap_changed"):
+            document.add_paragraph(strip_dashes(
+                f"The site's own sitemap changed between the two audits. It "
+                f"listed {sitemap.get('previous')} addresses last time and "
+                f"{sitemap.get('now')} this time. That is a change on the "
+                f"site, not in how it was audited."))
+        document.add_paragraph(strip_dashes(
+            "Because the two audits saw different amounts of the site, the "
+            "counts below are not comparable with each other. A number that "
+            "looks higher or lower mostly reflects how many pages were "
+            "reached, so this report draws no conclusion from it."))
+        document.add_paragraph(strip_dashes(
+            "Worth checking on your side: a sitemap that reports a different "
+            "size from one fetch to the next usually points to a caching or "
+            "generation problem, and it affects what search engines see too."))
+    else:
+        _add_section_body(document, narrator.write("comparison", comparison))
+
+    notable = comparison.get("notable") or []
+    if notable:
+        _add_table(document,
+                   ["Measure", "Previous", "Now", "Change", "Note"],
+                   [[_metric_label(n["metric"]), n["previous"], n["now"],
+                     n["change"], n.get("note", "")]
+                    for n in notable[:APPENDIX_ROWS]])
+
+
+def _metric_label(metric: str) -> str:
+    """Plain names for the handful of metrics the comparison tracks."""
+    names = {
+        "pages_found": "addresses crawled",
+        "pages_parsed": "pages read",
+        "sitemap_urls_total": "addresses in the sitemap",
+        "site_score": "overall score",
+        "mean_mobile_score": "average mobile speed score",
+        "orphan_pages": "pages with no links in",
+        "broken_internal_targets": "broken internal addresses",
+        "external_broken": "broken links to other sites",
+    }
+    return names.get(metric, metric.replace("_", " "))
 
 
 def _coverage_paragraph(findings: Dict) -> str:
@@ -234,16 +365,26 @@ def _coverage_paragraph(findings: Dict) -> str:
     return strip_dashes(sentence)
 
 
+SCOPE_WORDS = {"config": "one setting", "template": "one template",
+               "page": "page by page"}
+
+
 def _fixes_table_rows(fixes: List[Dict]) -> List[List[str]]:
     rows = []
     for fix in fixes[:TOP_FIXES]:
         affected = fix.get("pages_affected") or {}
+        scale = (f"{affected.get('count', 0)} of {affected.get('whole', 0)} "
+                 f"{affected.get('whole_is', 'pages')}")
+        targets = fix.get("targets")
+        if targets:
+            # "118 of 842 pages" was 118 external links. Say which is which.
+            scale += (f" ({targets['count']} of {targets['whole']} "
+                      f"{targets['whole_is']})")
         rows.append([
             fix.get("title", ""),
-            f"{affected.get('count', 0)} of {affected.get('whole', 0)} "
-            f"{affected.get('whole_is', 'pages')}",
+            scale,
             fix.get("severity", ""),
-            fix.get("fix_scope", ""),
+            SCOPE_WORDS.get(fix.get("fix_scope", ""), fix.get("fix_scope", "")),
         ])
     return rows
 
@@ -262,26 +403,28 @@ def build_document(findings: Dict, narrator: Narrator, charts: Dict,
     document.add_paragraph(_coverage_paragraph(findings))
 
     document.add_heading("Executive summary", level=1)
-    document.add_paragraph(narrator.summary(
+    _add_section_body(document, narrator.summary(
         findings.get("headline") or {},
         findings.get("prioritised_fixes") or []))
     if "headline" in charts:
         _add_chart(document, charts["headline"])
+
+    _add_glossary(document)
 
     document.add_heading("Priority fixes", level=1)
     fixes = findings.get("prioritised_fixes") or []
     if fixes:
         _add_table(document, ["Fix", "Pages affected", "Severity", "Scope"],
                    _fixes_table_rows(fixes))
-    document.add_paragraph(narrator.write("prioritised_fixes",
-                                          fixes[:TOP_FIXES]))
+    _add_section_body(document, narrator.write("prioritised_fixes",
+                                               fixes[:TOP_FIXES]))
 
     for key, heading in SECTIONS:
         section = findings.get(key)
         if section is None:
             continue
         document.add_heading(heading, level=1)
-        document.add_paragraph(narrator.write(key, section))
+        _add_section_body(document, narrator.write(key, section))
         if key in charts:
             _add_chart(document, charts[key])
         if key == "crawlability" and "crawlability_redirects" in charts:
@@ -292,20 +435,7 @@ def build_document(findings: Dict, narrator: Narrator, charts: Dict,
     comparison = findings.get("comparison") or {}
     if comparison.get("previous_run"):
         document.add_heading("Comparison with the previous audit", level=1)
-        if comparison.get("coverage_changed"):
-            document.add_paragraph(strip_dashes(
-                "This audit saw a different amount of the site than the one "
-                "before it, so counts are not directly comparable. Where a "
-                "number rose or fell, that is the crawl reaching more or "
-                "fewer pages, not the site itself changing."))
-        document.add_paragraph(narrator.write("comparison", comparison))
-        notable = comparison.get("notable") or []
-        if notable:
-            _add_table(document,
-                       ["Measure", "Previous", "Now", "Change", "Note"],
-                       [[n["metric"].replace("_", " "), n["previous"],
-                         n["now"], n["change"], n.get("note", "")]
-                        for n in notable[:APPENDIX_ROWS]])
+        _add_comparison(document, comparison, narrator)
 
     document.add_heading("Search performance", level=1)
     document.add_paragraph(strip_dashes(
@@ -347,6 +477,36 @@ class ValidationError(RuntimeError):
 
 
 _BAD_DASH = re.compile(r"[‐-―−]|(?<=\S) - (?=\S)")
+# A finished sentence. An action item that does not match this stopped early.
+_ENDS_PROPERLY = re.compile(r"[.!?][\"')\]]?$")
+
+
+def _sections_missing_parts(document) -> List[str]:
+    """Narrative headings whose body lacks found, why or what to do."""
+    narrative_headings = {title for _key, title in SECTIONS}
+    narrative_headings.add("Executive summary")
+    narrative_headings.add("Priority fixes")
+
+    missing: List[str] = []
+    current: Optional[str] = None
+    seen: set = set()
+    for paragraph in document.paragraphs:
+        style = paragraph.style.name
+        text = paragraph.text.strip()
+        if style.startswith("Heading") or style == "Title":
+            if current in narrative_headings and len(seen) < 3:
+                missing.append(current)
+            current = text if text in narrative_headings else None
+            seen = set()
+            continue
+        if current is None:
+            continue
+        for part in ("What we found.", "Why it matters.", "What to do."):
+            if text.startswith(part.rstrip(".")):
+                seen.add(part)
+    if current in narrative_headings and len(seen) < 3:
+        missing.append(current)
+    return missing
 
 
 def validate(path: str, expected_headings: List[str],
@@ -402,6 +562,33 @@ def validate(path: str, expected_headings: List[str],
             if not document.tables and not document.inline_shapes:
                 problems.append(f"empty section body under {text!r}")
 
+    # Truncation. The real failure mode is a list that stopped mid item, so
+    # the check is on the list items themselves rather than on any paragraph
+    # ending in a digit: "Trailing slash: 0." is data, not a cut off list.
+    for paragraph in document.paragraphs:
+        if paragraph.style.name != "List Number":
+            continue
+        item = paragraph.text.strip()
+        if item and not _ENDS_PROPERLY.search(item):
+            problems.append(f"action item ends mid sentence: {item[-60:]!r}")
+            break
+
+    # "What to do." is a label this code writes; it must be followed by at
+    # least one action.
+    paragraphs = list(document.paragraphs)
+    for index, paragraph in enumerate(paragraphs):
+        if paragraph.text.strip() != "What to do.":
+            continue
+        following = paragraphs[index + 1:index + 2]
+        if not following or following[0].style.name != "List Number":
+            problems.append("a what to do heading has no actions under it")
+            break
+
+    # Every narrative section must carry all three parts.
+    missing_parts = _sections_missing_parts(document)
+    for heading in missing_parts:
+        problems.append(f"section {heading!r} is missing a part")
+
     if os.path.getsize(path) > MAX_DOC_BYTES:
         problems.append(f"file is {os.path.getsize(path)} bytes, over the "
                         f"{MAX_DOC_BYTES} limit")
@@ -409,7 +596,8 @@ def validate(path: str, expected_headings: List[str],
 
 
 def expected_headings_for(findings: Dict) -> List[str]:
-    headings = ["Executive summary", "Priority fixes"]
+    headings = ["Executive summary", "Terms used in this report",
+                "Priority fixes"]
     headings += [title for key, title in SECTIONS if findings.get(key) is not None]
     if (findings.get("comparison") or {}).get("previous_run"):
         headings.append("Comparison with the previous audit")

@@ -29,6 +29,11 @@
       "points": 8,
       "scope": "page"
     },
+    "canonical_consolidates_variant": {
+      "bucket": "indexability",
+      "points": 0,
+      "scope": "page"
+    },
     "canonical_missing": {
       "bucket": "indexability",
       "points": 5,

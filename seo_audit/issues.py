@@ -100,6 +100,9 @@ PAGE_ISSUE_SEVERITY: Dict[str, str] = {
     "nofollow_page": "medium",
     "canonical_missing": "medium",
     "canonical_off_page": "medium",
+    # A filtered or tracked address pointing back at its clean page is the
+    # site doing the right thing. It is reported, never listed as a fix.
+    "canonical_consolidates_variant": "info",
     "canonical_not_absolute": "low",
     "viewport_missing": "medium",
     "html_lang_missing": "low",
@@ -152,6 +155,201 @@ PAGE_ISSUE_SEVERITY: Dict[str, str] = {
 
 PAGE_ISSUE_COLUMNS = ["issue_type", "severity", "url", "final_url", "detail",
                       "site_level"]
+
+# What each issue is called in front of a client, what its count counts, and
+# one sentence stating the finding. Identifiers like "title_missing" are for
+# the code; none of them should reach a document.
+#   label         short plain name, no underscores
+#   plain_finding one sentence taking {count} and {whole}
+#   unit          what the count counts: page, target, group or site
+PAGE_ISSUE_META: Dict[str, tuple] = {
+    "title_missing": ("page title missing",
+                      "{count} of {whole} pages have no page title", "page"),
+    "title_too_long": ("page title too long",
+                       "{count} of {whole} pages have a title that will be "
+                       "cut short in search results", "page"),
+    "title_too_short": ("page title very short",
+                        "{count} of {whole} pages have a title of only a few "
+                        "characters", "page"),
+    "meta_description_missing": (
+        "search description missing",
+        "{count} of {whole} pages have no search description", "page"),
+    "meta_description_too_long": (
+        "search description too long",
+        "{count} of {whole} pages have a search description that will be cut "
+        "short", "page"),
+    "h1_missing": ("main heading missing",
+                   "{count} of {whole} pages have no main heading", "page"),
+    "h1_multiple": ("more than one main heading",
+                    "{count} of {whole} pages carry more than one main "
+                    "heading", "page"),
+    "noindex_page": ("page hidden from search",
+                     "{count} of {whole} pages tell search engines not to "
+                     "list them", "page"),
+    "nofollow_page": ("links on the page not followed",
+                      "{count} of {whole} pages tell search engines not to "
+                      "follow their links", "page"),
+    "canonical_missing": ("preferred address missing",
+                          "{count} of {whole} pages do not name a preferred "
+                          "address", "page"),
+    "canonical_off_page": ("preferred address points elsewhere",
+                           "{count} of {whole} pages name a different page as "
+                           "the preferred one", "page"),
+    "canonical_consolidates_variant": (
+        "canonical points variant to its clean page",
+        "{count} of {whole} pages correctly point a filtered or tracked "
+        "address back to their clean address", "page"),
+    "canonical_not_absolute": ("preferred address written as a partial link",
+                               "{count} of {whole} pages write the preferred "
+                               "address as a partial link", "page"),
+    "viewport_missing": ("no mobile layout setting",
+                         "{count} of {whole} pages have no mobile layout "
+                         "setting", "page"),
+    "html_lang_missing": ("page language not declared",
+                          "{count} of {whole} pages do not declare their "
+                          "language", "page"),
+    "images_missing_alt": ("images without a description",
+                           "{count} of {whole} pages have images with no text "
+                           "description", "page"),
+    "thin_page": ("very little text",
+                  "{count} of {whole} pages carry very little text", "page"),
+    "mixed_content": ("insecure files on a secure page",
+                      "{count} of {whole} pages load files over an insecure "
+                      "connection", "page"),
+    "schema_missing": ("no structured data",
+                       "{count} of {whole} pages carry no structured data",
+                       "page"),
+    "schema_invalid_json": ("structured data will not parse",
+                            "{count} of {whole} pages carry structured data "
+                            "that cannot be read", "page"),
+    "schema_missing_property": ("structured data incomplete",
+                                "{count} of {whole} pages carry structured "
+                                "data missing a required field", "page"),
+    "schema_microdata_only": ("structured data in an older format",
+                              "{count} of {whole} pages carry structured data "
+                              "only in an older format", "page"),
+    "canonical_target_not_crawled": (
+        "preferred address never reached",
+        "{count} of {whole} pages point to a preferred address the crawl "
+        "never reached", "page"),
+    "canonical_target_unchecked": (
+        "preferred address not checked",
+        "{count} of {whole} pages point to a preferred address that was not "
+        "checked", "page"),
+    "canonical_target_non_200": (
+        "preferred address is broken",
+        "{count} of {whole} pages point to a preferred address that does not "
+        "load", "page"),
+    "canonical_chain": ("preferred address points on again",
+                        "{count} of {whole} pages point to a page that itself "
+                        "points somewhere else", "page"),
+    "canonical_target_noindex": (
+        "preferred address is hidden from search",
+        "{count} of {whole} pages point to a page that is hidden from search",
+        "page"),
+    "hreflang_not_reciprocal": ("language versions do not agree",
+                                "{count} of {whole} pages name a language "
+                                "version that does not name them back",
+                                "page"),
+    "hreflang_target_non_200": ("language version is broken",
+                                "{count} of {whole} pages name a language "
+                                "version that does not load", "page"),
+    "duplicate_title": ("same title on several pages",
+                        "{count} groups of pages share one title", "group"),
+    "duplicate_meta_description": (
+        "same search description on several pages",
+        "{count} groups of pages share one search description", "group"),
+    "sitemap_noindex": ("hidden page listed in the sitemap",
+                        "{count} of {whole} pages are listed in the sitemap "
+                        "but hidden from search", "page"),
+    "sitemap_off_canonical": (
+        "sitemap lists a page that points elsewhere",
+        "{count} of {whole} pages are listed in the sitemap but name another "
+        "page as preferred", "page"),
+    "orphan_page": ("no links to the page",
+                    "{count} of {whole} pages have no links from any other "
+                    "page on the site", "page"),
+    "low_inlink_page": ("only one link to the page",
+                        "{count} of {whole} pages have just one link from "
+                        "elsewhere on the site", "page"),
+    "broken_internal_link": ("links to pages that are gone",
+                             "{count} addresses linked from the site no "
+                             "longer load", "target"),
+    "redirected_internal_link": ("links that bounce through a redirect",
+                                 "{count} addresses linked from the site send "
+                                 "visitors on to another address", "target"),
+    "nofollow_internal_link": ("internal links marked not to follow",
+                               "{count} of {whole} pages carry internal links "
+                               "marked not to follow", "page"),
+    "generic_anchor": ("vague link wording",
+                       "{count} of {whole} pages are linked only by vague "
+                       "wording such as click here", "page"),
+    "external_link_broken": ("links to other websites that are gone",
+                             "{count} links to other websites no longer load",
+                             "target"),
+    "duplicate_content": ("pages with the same text",
+                          "{count} groups of pages carry the same text",
+                          "group"),
+    "near_duplicate_content": ("pages with almost the same text",
+                               "{count} groups of pages carry almost the same "
+                               "text", "group"),
+    "http_to_https_redirect": ("insecure address does not redirect",
+                               "the insecure address of the site does not send "
+                               "visitors to the secure one", "site"),
+    "hsts_missing": ("secure connection not enforced",
+                     "the site does not tell browsers to always use a secure "
+                     "connection", "site"),
+    "csp_missing": ("no content security policy",
+                    "the site does not send a content security policy",
+                    "site"),
+    "x_content_type_options_missing": (
+        "file type protection header missing",
+        "the site does not send the header that stops browsers guessing file "
+        "types", "site"),
+    "x_frame_options_missing": ("framing protection header missing",
+                                "the site does not send the header that stops "
+                                "other sites framing its pages", "site"),
+    "performance_poor": ("slow page template",
+                         "{count} measured page templates score poorly for "
+                         "speed", "group"),
+    "lcp_poor": ("main content loads slowly",
+                 "{count} measured page templates take a long time to show "
+                 "their main content", "group"),
+    "cls_poor": ("layout moves while loading",
+                 "{count} measured page templates move about while they load",
+                 "group"),
+    "inp_poor": ("slow to respond to taps",
+                 "{count} measured page templates are slow to respond when "
+                 "tapped", "group"),
+    "performance_no_field_data": ("no real visitor speed data",
+                                  "{count} measured page templates have no "
+                                  "speed data from real visitors", "group"),
+    "pagespeed_error": ("speed could not be measured",
+                        "{count} measured page templates could not be "
+                        "measured for speed", "group"),
+}
+
+
+def label_of(issue_type: str) -> str:
+    """The plain name for a client. Never the identifier."""
+    entry = PAGE_ISSUE_META.get(issue_type)
+    return entry[0] if entry else issue_type.replace("_", " ")
+
+
+def plain_finding(issue_type: str, count: int, whole: int = 0) -> str:
+    """One sentence stating the finding, with the numbers filled in."""
+    entry = PAGE_ISSUE_META.get(issue_type)
+    template = entry[1] if entry else "{count} of {whole} pages are affected"
+    try:
+        return template.format(count=count, whole=whole)
+    except (KeyError, IndexError, ValueError):
+        return f"{count} of {whole} pages are affected"
+
+
+def unit_of(issue_type: str) -> str:
+    """What the count counts: page, target, group or site."""
+    entry = PAGE_ISSUE_META.get(issue_type)
+    return entry[2] if entry else "page"
 
 # Robots user-agent tokens worth reporting when a site names them.
 AI_CRAWLER_TOKENS = (
