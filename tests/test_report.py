@@ -494,8 +494,11 @@ def test_a_bulleted_list_survives_the_docx_round_trip(tmp_path):
         assert " - " not in paragraph.text
 
 
-def test_a_template_name_in_braces_is_not_a_placeholder(run_dir, tmp_path):
-    """"/workspaces/{slug}" is data this product produces, not an unfilled slot."""
+def test_a_template_name_in_braces_is_a_shape_not_a_placeholder(run_dir,
+                                                                tmp_path):
+    """"/workspaces/{slug}" is data this product produces, not an unfilled
+    slot. It is refused in client text now, but under its own name: a shape
+    the client should never have to read. See test_wording.py."""
     from docx import Document
     result = generate(run_dir, use_ai=False)
     document = Document(result["docx"])
@@ -508,6 +511,7 @@ def test_a_template_name_in_braces_is_not_a_placeholder(run_dir, tmp_path):
     problems = validate(path, expected_headings_for(findings),
                         len(build_charts(findings)))
     assert not any("placeholder" in p for p in problems)
+    assert any("template shape" in p for p in problems)
 
 
 def test_a_real_unfilled_placeholder_is_still_caught(run_dir, tmp_path):

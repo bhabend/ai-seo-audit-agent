@@ -92,8 +92,16 @@ STYLE = (
     "- Never define a term. A glossary elsewhere does that.\n"
     "- Never use any of these words: " + ", ".join(BANNED_WORDS) + ".\n"
     "- Use this wording instead: " + PREFERRED_WORDING + ".\n"
+    "- British spelling throughout: optimise, prioritise, organise, "
+    "recognise, analyse. Never the American z spelling.\n"
+    "- Never use these empty words: leverage, robust, ensure, impactful, "
+    "best practices, seamless, holistic, utilise, actionable, streamline. "
+    "Say the thing itself instead.\n"
+    "- Call the setting that keeps the site on a secure connection 'the "
+    "secure connection setting'.\n"
     "- Never use an internal identifier. Words joined by underscores are "
-    "never allowed. Use the plain labels given to you.\n"
+    "never allowed, and neither are page shapes in braces such as "
+    "{slug}: name a template in words, for example 'workspaces pages'.\n"
     "- Never use a dash of any kind. No em dash, no en dash, no hyphen as "
     "punctuation. Use a comma or a full stop.\n"
     "- Never state a number that is not in the text you were given.\n"
@@ -234,9 +242,23 @@ def find_jargon(*texts: Any) -> List[str]:
 
 # An action item is for the client's website. "Expand measurement to the 125
 # unmeasured templates" is a note to ourselves that reached a client report.
+#
+# Matched as phrases, not as words. The first version of this rule dropped
+# any item containing "audit", which took "Audit and reduce third party
+# scripts on high traffic templates" out of a client's report: a perfectly
+# good instruction, thrown away for using the word as a verb. Only our own
+# measuring is dropped now.
 _ABOUT_THE_AUDIT = re.compile(
-    r"\b(measure\w*|sampl\w*|unmeasured|audit\w*|re-?run|rerun|recrawl)\b"
-    r"|\bcrawl the\b|\bexpand coverage\b|\bexpand (the )?crawl\b", re.I)
+    r"\bunmeasured\b"
+    r"|\bmeasure (more|the remaining|the rest|further|additional)\b"
+    r"|\bexpand (the )?(measurement|coverage|sampling|crawl)\b"
+    r"|\bmeasurement (coverage|to)\b"
+    r"|\bsample more\b|\bsampled templates\b|\bwiden the sample\b"
+    r"|\bre-?run the audit\b|\brun the audit again\b|\bre-?audit\b"
+    r"|\bcrawl the site again\b|\bre-?crawl\b"
+    r"|\bthe audit did not\b|\bthis audit\b|\bthe next audit\b"
+    r"|\bin a future audit\b|\bfuture audits\b",
+    re.I)
 
 
 def is_about_the_audit(item: str) -> bool:
@@ -249,6 +271,66 @@ def filter_todo(items: Iterable[str]) -> Tuple[List[str], List[str]]:
     for item in items:
         (dropped if is_about_the_audit(item) else kept).append(item)
     return kept, dropped
+
+
+# --- guard: British spelling and empty words --------------------------------
+
+# The report is written for a client in India, in British English. American
+# spellings arrive in almost every paragraph, so they are corrected rather
+# than argued with: a spelling is not worth a second call.
+_IZE_WORDS = ("optimi", "prioriti", "organi", "recogni", "reali", "minimi",
+              "maximi", "utili", "summari", "categori", "standardi",
+              "personali", "emphasi", "analy")
+_IZE = re.compile(r"\b(" + "|".join(_IZE_WORDS) + r")(z)(e|es|ed|ing|ation)\b",
+                  re.I)
+# Words that fill a sentence without saying anything. Unlike a spelling,
+# these mean the sentence has to be written again.
+VAGUE_WORDS = ("leverage", "leveraging", "robust", "ensure", "ensuring",
+               "impactful", "best practices", "best practice", "seamless",
+               "holistic", "synergy", "utilise", "utilize", "actionable",
+               "world class", "cutting edge", "streamline", "streamlined")
+_VAGUE = re.compile(
+    r"\b(" + "|".join(re.escape(w) for w in sorted(VAGUE_WORDS, key=len,
+                                                   reverse=True)) + r")\b",
+    re.I)
+
+
+def to_british(text: str) -> str:
+    """American -ize spellings to -ise, keeping the writer's capitals."""
+    def swap(match):
+        return match.group(1) + ("S" if match.group(2).isupper() else "s") \
+            + match.group(3)
+    return _IZE.sub(swap, str(text or ""))
+
+
+def _to_british_section(parsed: Optional[Dict]) -> Optional[Dict]:
+    """The model's two parts, respelled, never sent back for a spelling."""
+    if not parsed:
+        return parsed
+    return {**parsed,
+            "why": to_british(parsed.get("why", "")),
+            "todo": [to_british(t) for t in (parsed.get("todo") or [])]}
+
+
+def _word_problems(parsed: Optional[Dict]) -> List[str]:
+    """Jargon plus empty words: one list, so one regeneration covers both."""
+    if not parsed:
+        return []
+    return (find_jargon(parsed.get("why"), parsed.get("todo"))
+            + find_vague(parsed.get("why"), parsed.get("todo")))
+
+
+def find_vague(*texts: Any) -> List[str]:
+    """Empty words in the model's text, in the order they appear."""
+    hits: List[str] = []
+    for text in texts:
+        items = text if isinstance(text, (list, tuple)) else [text]
+        for item in items:
+            for match in _VAGUE.finditer(str(item or "")):
+                word = match.group(1).lower()
+                if word not in hits:
+                    hits.append(word)
+    return hits
 
 
 # --- guard 3: length --------------------------------------------------------
@@ -293,13 +375,28 @@ def _is_internal_key(key: str) -> bool:
     return any(part in lowered for part in INTERNAL_KEY_PARTS)
 
 
+# A URL shape as the sampler writes it: "/workspaces/{slug} (depth 4)".
+_SHAPE = re.compile(r"^/\S*(\{[a-z]+\})?\S*(\s*\((depth \d+|homepage)\))?$")
+
+
+def _is_shape(value: str) -> bool:
+    """True for a template shape, false for a URL or ordinary text."""
+    text = str(value).strip()
+    if not text.startswith("/"):
+        return False
+    return bool("{" in text or "(depth " in text or "(homepage)" in text
+                or _SHAPE.match(text))
+
+
 def curate(node: Any) -> Any:
     """The section as the model should see it.
 
-    Internal machinery is removed and identifiers are replaced with their
-    plain labels, so the model cannot repeat back a word like simhash or
-    title_missing even if it wanted to.
+    Internal machinery is removed, identifiers are replaced with their plain
+    labels and template shapes with their plain words, so the model cannot
+    repeat back simhash, title_missing or /workspaces/{slug} even if it
+    wanted to.
     """
+    from .findings import template_words
     from .issues import PAGE_ISSUE_META, label_of
 
     if isinstance(node, dict):
@@ -317,6 +414,8 @@ def curate(node: Any) -> Any:
         return [curate(item) for item in node]
     if isinstance(node, str) and node in PAGE_ISSUE_META:
         return label_of(node)
+    if isinstance(node, str) and _is_shape(node):
+        return template_words(node)
     return node
 
 
@@ -372,12 +471,19 @@ def _is_truncated(parsed: Dict, finish_reason: str = "stop") -> bool:
 
 
 def _clean_section(section: Dict, limit: int) -> Dict:
-    """Dashes out and length capped, on every part."""
+    """Dashes out and length capped, on every part.
+
+    The findings paragraph is never word capped: it is ours, every sentence
+    in it is a finding, and a finding may not be lost to a word count. What
+    runs long moves into the "Also found" table instead.
+    """
     return {
-        "found": cap_words(strip_dashes(section.get("found", "")), limit),
+        "found": strip_dashes(section.get("found", "")),
         "why": cap_words(strip_dashes(section.get("why", "")), limit),
         "todo": [strip_dashes(t) for t in section.get("todo", [])
                  if str(t).strip()][:MAX_TODO_ITEMS],
+        "also_found": [[strip_dashes(str(cell)) for cell in row]
+                       for row in section.get("also_found") or []],
     }
 
 
@@ -459,12 +565,15 @@ def _collect_issue_counts(node: Any, out: Optional[Dict] = None) -> Dict:
 
 def templated_section(section_name: str, section: Any,
                       facts: Optional[str] = None,
-                      default_whole: int = 0) -> Dict:
+                      default_whole: int = 0,
+                      also_found: Optional[List[List[str]]] = None) -> Dict:
     """The three parts, built from the data, for --no-ai and for fallback."""
     if facts is None:
-        facts = section_facts(section_name, section, default_whole)
+        facts, also_found, _everything = section_facts_parts(
+            section_name, section, default_whole)
     return {
         "found": facts,
+        "also_found": also_found or [],
         "why": ("These are the findings for this part of the audit. The "
                 "priority fixes section lists what to do first."),
         "todo": ["Work through the fixes listed for this section in the "
@@ -558,7 +667,9 @@ FACT_PATHS: Dict[str, Tuple[Tuple[str, Tuple[str, ...]], ...]] = {
 }
 
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "unmeasured": 3, "info": 4}
-MAX_FACT_SENTENCES = 10
+# Six sentences is a paragraph. Ten is a list that has not admitted it yet,
+# so the rest of the findings become the "Also found" table.
+MAX_FACT_SENTENCES = 6
 
 
 def _value_at(node: Any, path: Tuple[str, ...]) -> Any:
@@ -583,28 +694,38 @@ def _count_and_whole(value: Any, default_whole: int) -> Tuple[int, int]:
     return 0, default_whole
 
 
-def fact_entries(section_name: str, section: Any,
-                 default_whole: int = 0) -> List[Tuple[str, int, int]]:
-    """(issue type, count, whole) for everything this section actually found.
+def fact_entries(section_name: str, section: Any, default_whole: int = 0
+                 ) -> List[Tuple[str, int, int, str]]:
+    """(issue type, count, whole, what the whole is) for what was found.
 
     Zero counts are left out entirely: a section that opens on what was not
     found buries what was.
     """
-    entries: List[Tuple[str, int, int]] = []
-    seen: Set[str] = set()
-    for issue_type, path in FACT_PATHS.get(section_name, ()):
-        count, whole = _count_and_whole(_value_at(section, path),
-                                        default_whole)
-        if count > 0:
-            entries.append((issue_type, count, whole))
-            seen.add(issue_type)
+    from .issues import PAGE_ISSUE_META, unit_of
 
-    from .issues import PAGE_ISSUE_META
+    entries: List[Tuple[str, int, int, str]] = []
+    seen: Set[str] = set()
+
+    def add(issue_type: str, value: Any):
+        count, whole = _count_and_whole(value, default_whole)
+        if count <= 0:
+            return
+        whole_is = (value.get("whole_is") or "pages parsed"
+                    if isinstance(value, dict) else "pages parsed")
+        if unit_of(issue_type) != "page" and not isinstance(value, dict):
+            # A count of addresses or of groups is not a count of pages, so
+            # it is never handed the page total as its whole.
+            whole, whole_is = 0, ""
+        entries.append((issue_type, count, whole, whole_is))
+        seen.add(issue_type)
+
+    for issue_type, path in FACT_PATHS.get(section_name, ()):
+        add(issue_type, _value_at(section, path))
 
     # Site level settings are recorded as a list of types, not as counts.
     for issue_type in (_value_at(section, ("site_level", "types")) or []):
         if issue_type in PAGE_ISSUE_META and issue_type not in seen:
-            entries.append((issue_type, 1, 0))
+            entries.append((issue_type, 1, 0, ""))
             seen.add(issue_type)
 
     if not entries:
@@ -613,18 +734,21 @@ def fact_entries(section_name: str, section: Any,
         for issue_type, (count, whole, _ev) in _collect_issue_counts(
                 section).items():
             if count > 0 and issue_type not in seen:
-                entries.append((issue_type, count, whole or default_whole))
+                page_unit = unit_of(issue_type) == "page"
+                entries.append((issue_type, count,
+                                whole or (default_whole if page_unit else 0),
+                                "pages parsed" if page_unit else ""))
                 seen.add(issue_type)
     return entries
 
 
 def _positive_sentences(section_name: str, section: Any,
-                        entries: List[Tuple[str, int, int]]) -> List[str]:
+                        entries: List[Tuple[str, int, int, str]]) -> List[str]:
     """What the site already does right, said last and said once."""
     from .issues import plain_finding
 
     out = []
-    for issue_type, count, whole in entries:
+    for issue_type, count, whole, _whole_is in entries:
         out.append(plain_finding(issue_type, count, whole))
     if section_name == "content":
         handled = 0
@@ -643,13 +767,50 @@ def _positive_sentences(section_name: str, section: Any,
     return out
 
 
+def _count_text(issue_type: str, count: int, whole: int,
+                whole_is: str) -> str:
+    """What the count counts, for the "Also found" table's second column."""
+    from .issues import unit_of
+
+    if whole:
+        return f"{count} of {whole} {whole_is}".strip()
+    unit = unit_of(issue_type)
+    if unit == "site":
+        return "site wide"
+    if unit == "group":
+        return _plural(count, "group") + " of pages"
+    if unit == "target":
+        return _plural(count, "link" if "external" in issue_type
+                       else "address", None if "external" in issue_type
+                       else "addresses")
+    return _plural(count, "page")
+
+
 def section_facts(section_name: str, section: Any,
                   default_whole: int = 0) -> str:
-    """The "what we found" paragraph, built from the findings themselves."""
-    from .issues import PAGE_ISSUE_SEVERITY, plain_finding
+    """Everything this section found, said in full. The model sees this."""
+    return section_facts_parts(section_name, section, default_whole)[2]
+
+
+def section_facts_parts(section_name: str, section: Any,
+                        default_whole: int = 0
+                        ) -> Tuple[str, List[List[str]], str]:
+    """(paragraph, "Also found" rows, everything).
+
+    Ten findings in a row stop being a paragraph and become a list wearing a
+    paragraph's clothes. The six that matter most are said in sentences and
+    the rest go into a small table, where a reader can scan them. Nothing is
+    dropped: every finding is in exactly one of the two, and the model is
+    handed all of it either way.
+    """
+    from .issues import PAGE_ISSUE_SEVERITY, label_of, plain_finding
 
     if _is_fix_list(section):
-        return _fix_list_facts(section)
+        # The fixes table sits directly above this paragraph and lists every
+        # one of them with its count, so the overflow needs no table of its
+        # own. The model is still handed all of them.
+        paragraph, everything = _fix_list_facts(section)
+        return paragraph, [], everything
 
     entries = fact_entries(section_name, section, default_whole)
     negatives = [e for e in entries
@@ -658,45 +819,77 @@ def section_facts(section_name: str, section: Any,
     negatives.sort(key=lambda e: (SEVERITY_ORDER.get(
         PAGE_ISSUE_SEVERITY.get(e[0], "low"), 2), -e[1]))
 
-    sentences = [plain_finding(t, c, w).capitalize().rstrip(".") + "."
-                 for t, c, w in negatives[:MAX_FACT_SENTENCES]]
+    # Sentences this section writes for itself, which have no issue type and
+    # so are always in the paragraph.
+    lead = _performance_facts(section_name, section)
     if section_name == "crawlability":
-        sentences = _crawlability_facts(section) + sentences
-    sentences = _performance_facts(section_name, section) + sentences
+        lead = lead + _crawlability_facts(section)
+
+    findings = lead + [(plain_finding(t, c, w).capitalize().rstrip(".") + ".",
+                        label_of(t), _count_text(t, c, w, whole_is))
+                       for t, c, w, whole_is in negatives]
+
+    sentences = [sentence for sentence, _l, _c
+                 in findings[:MAX_FACT_SENTENCES]]
+    rows = [[label.capitalize(), count] for _s, label, count
+            in findings[MAX_FACT_SENTENCES:]]
 
     good = _positive_sentences(section_name, section, positives)
     if good:
+        # Good news is a summary, not a finding, so it closes the paragraph
+        # rather than competing for a place in it.
         sentences.append("The site also gets some things right: "
                          + "; ".join(good) + ".")
 
-    if not sentences:
-        return templated(section_name, section, skip_zero=True)
-    return " ".join(sentences)
+    if not sentences and not rows:
+        blank = templated(section_name, section, skip_zero=True)
+        return blank, [], blank
+
+    paragraph = " ".join(sentences)
+    everything = " ".join(
+        sentences + [s for s, _l, _c in findings[MAX_FACT_SENTENCES:]])
+    return paragraph, rows, everything
 
 
-def _performance_facts(section_name: str, section: Any) -> List[str]:
+def _performance_facts(section_name: str,
+                       section: Any) -> List[Tuple[str, str, str]]:
     """Speed has no page counts of its own: it is measured per template."""
+    from .findings import template_words
+
     if section_name != "performance" or not isinstance(section, dict):
         return []
     if section.get("skipped"):
-        return ["Speed was not measured for this audit."]
+        return [("Speed was not measured for this audit.", "Speed",
+                 "not measured")]
     represented = section.get("pages_represented") or {}
     measured = section.get("templates_measured") or []
-    out = []
+    out: List[Tuple[str, str, str]] = []
     if measured:
-        out.append(f"Speed was measured on {len(measured)} page templates, "
-                   f"covering {represented.get('count', 0)} of "
-                   f"{represented.get('whole', 0)} pages read.")
+        out.append((f"Speed was measured on {len(measured)} page templates, "
+                    f"covering {represented.get('count', 0)} of "
+                    f"{represented.get('whole', 0)} pages read.",
+                    "Templates measured for speed",
+                    f"{len(measured)} of "
+                    f"{len(measured) + (section.get('templates_unmeasured_count') or 0)}"
+                    f" templates"))
     mobile = section.get("mean_mobile_score")
     desktop = section.get("mean_desktop_score")
     if mobile is not None:
-        out.append(f"The measured templates average {mobile} out of 100 on a "
-                   f"phone and {desktop} out of 100 on a desktop.")
+        out.append((f"The measured templates average {mobile} out of 100 on "
+                    f"a phone and {desktop} out of 100 on a desktop.",
+                    "Average speed score",
+                    f"{mobile} of 100 on a phone"))
     worst = section.get("worst_template")
     if isinstance(worst, dict):
-        worst = worst.get("template")
+        # The shape is for the developers in the appendix; a sentence gets
+        # the words. "/workspaces/{slug} (depth 4)" is not English.
+        worst = worst.get("template_words") or template_words(
+            worst.get("template", ""))
+    elif isinstance(worst, str):
+        worst = template_words(worst)
     if worst:
-        out.append(f"The slowest template on a phone is {worst}.")
+        out.append((f"The slowest template on a phone is {worst}.",
+                    "Slowest template on a phone", str(worst)))
     return out
 
 
@@ -705,34 +898,45 @@ def _plural(count: int, singular: str, plural: Optional[str] = None) -> str:
     return f"{count} {singular if count == 1 else (plural or singular + 's')}"
 
 
-def _crawlability_facts(section: Any) -> List[str]:
-    """Crawlability counts obstacles, not page faults, so it says its own."""
+def _crawlability_facts(section: Any) -> List[Tuple[str, str, str]]:
+    """Crawlability counts obstacles, not page faults, so it says its own.
+
+    Each fact is a sentence for the paragraph and a name and a count for the
+    table, because a section with nine obstacles is a list, not a paragraph.
+    """
     if not isinstance(section, dict):
         return []
     sitemap = section.get("sitemap") or {}
     redirects = section.get("redirects") or {}
     robots = section.get("robots") or {}
-    out: List[str] = []
+    out: List[Tuple[str, str, str]] = []
 
     total = sitemap.get("urls_total") or 0
     if total:
-        out.append(f"The sitemap lists {total} addresses.")
+        out.append((f"The sitemap lists {total} addresses.",
+                    "Sitemap size",
+                    _plural(total, "address", "addresses")))
     count, whole = _count_and_whole(sitemap.get("in_sitemap_not_crawled"), 0)
     if count:
-        out.append(f"{count} of {whole} addresses in the sitemap "
-                   f"{'was' if count == 1 else 'were'} not reached from the "
-                   f"site's own links.")
+        out.append((f"{count} of {whole} addresses in the sitemap "
+                    f"{'was' if count == 1 else 'were'} not reached from the "
+                    f"site's own links.",
+                    "Sitemap addresses the crawl never reached",
+                    f"{count} of {whole} sitemap addresses"))
     count, whole = _count_and_whole(sitemap.get("crawled_not_in_sitemap"), 0)
     if count:
-        out.append(f"{count} of {whole} addresses found by following links "
-                   f"{'is' if count == 1 else 'are'} missing from the "
-                   f"sitemap.")
+        out.append((f"{count} of {whole} addresses found by following links "
+                    f"{'is' if count == 1 else 'are'} missing from the "
+                    f"sitemap.",
+                    "Addresses missing from the sitemap",
+                    f"{count} of {whole} addresses found"))
     if sitemap.get("non_200"):
-        out.append(f"{_plural(sitemap['non_200'], 'address', 'addresses')} "
-                   f"listed in the sitemap does not load."
-                   if sitemap["non_200"] == 1 else
-                   f"{sitemap['non_200']} addresses listed in the sitemap do "
-                   f"not load.")
+        many = sitemap["non_200"]
+        out.append((f"{_plural(many, 'address', 'addresses')} listed in the "
+                    f"sitemap does not load." if many == 1 else
+                    f"{many} addresses listed in the sitemap do not load.",
+                    "Sitemap entries that do not load",
+                    _plural(many, "address", "addresses")))
 
     count, whole = _count_and_whole(redirects.get("total"), 0)
     slash = _count_and_whole(redirects.get("trailing_slash"), 0)[0]
@@ -743,46 +947,60 @@ def _crawlability_facts(section: Any) -> List[str]:
         if slash:
             sentence += (f", and {slash} of those redirect only to add a "
                          f"slash at the end")
-        out.append(sentence + ".")
+        out.append((sentence + ".", "Addresses that redirect",
+                    f"{count} of {whole} addresses"))
     if redirects.get("chains"):
-        out.append(f"{_plural(redirects['chains'], 'address', 'addresses')} "
-                   f"redirect more than once before arriving.")
+        counted = _plural(redirects["chains"], "address", "addresses")
+        out.append((f"{counted} redirect more than once before arriving.",
+                    "Redirects that pass through another redirect", counted))
     if redirects.get("loops"):
-        out.append(f"{_plural(redirects['loops'], 'address', 'addresses')} "
-                   f"redirect in a loop and never arrive.")
+        counted = _plural(redirects["loops"], "address", "addresses")
+        out.append((f"{counted} redirect in a loop and never arrive.",
+                    "Redirect loops", counted))
 
-    for key, sentence in (
+    for key, sentence, name in (
             ("blocked_linked", "{n} linked from the site cannot be fetched, "
-                               "because the robots file forbids it."),
+                               "because the robots file forbids it.",
+             "Linked addresses the robots file blocks"),
             ("blocked_in_sitemap", "{n} listed in the sitemap cannot be "
                                    "fetched, because the robots file forbids "
-                                   "it.")):
+                                   "it.",
+             "Sitemap addresses the robots file blocks")):
         if robots.get(key):
-            out.append(sentence.format(
-                n=_plural(robots[key], "address", "addresses")))
+            counted = _plural(robots[key], "address", "addresses")
+            out.append((sentence.format(n=counted), name, counted))
     if not robots.get("found", True):
-        out.append("The site serves no robots file.")
+        out.append(("The site serves no robots file.", "Robots file",
+                    "not found"))
 
     count, whole = _count_and_whole(section.get("deep_pages"), 0)
     if count:
-        out.append(f"{count} of {whole} pages sit more than three clicks from "
-                   f"the home page.")
+        out.append((f"{count} of {whole} pages sit more than three clicks "
+                    f"from the home page.",
+                    "Pages more than three clicks from the home page",
+                    f"{count} of {whole} pages parsed"))
     count, whole = _count_and_whole(section.get("render_suspects"), 0)
     if count:
-        out.append(f"{count} of {whole} pages arrive with almost no text in "
-                   f"them until scripts run.")
+        out.append((f"{count} of {whole} pages arrive with almost no text "
+                    f"in them until scripts run.",
+                    "Pages with almost no text until scripts run",
+                    f"{count} of {whole} pages parsed"))
     if section.get("slow_responses"):
-        out.append(f"{_plural(section['slow_responses'], 'address', 'addresses')} "
-                   f"were slow to answer.")
+        counted = _plural(section["slow_responses"], "address", "addresses")
+        out.append((f"{counted} were slow to answer.",
+                    "Addresses slow to answer", counted))
     if section.get("fetch_errors"):
-        out.append(f"{_plural(section['fetch_errors'], 'address', 'addresses')} "
-                   f"returned nothing at all.")
+        counted = _plural(section["fetch_errors"], "address", "addresses")
+        out.append((f"{counted} returned nothing at all.",
+                    "Addresses that returned nothing", counted))
     if section.get("documents_linked"):
-        out.append(f"{_plural(section['documents_linked'], 'link')} points "
-                   f"at a document such as a PDF rather than at a page."
-                   if section["documents_linked"] == 1 else
-                   f"{section['documents_linked']} links point at documents "
-                   f"such as PDFs rather than at pages.")
+        many = section["documents_linked"]
+        out.append((f"{_plural(many, 'link')} points at a document such as a "
+                    f"PDF rather than at a page." if many == 1 else
+                    f"{many} links point at documents such as PDFs rather "
+                    f"than at pages.",
+                    "Links to documents rather than pages",
+                    _plural(many, "link")))
     return out
 
 
@@ -792,13 +1010,13 @@ def _is_fix_list(section: Any) -> bool:
                     for f in section))
 
 
-def _fix_list_facts(fixes: List[Dict]) -> str:
+def _fix_list_facts(fixes: List[Dict]) -> Tuple[str, str]:
     """The priority fixes carry their own sentence, already unit correct."""
     sentences = []
-    for fix in fixes[:MAX_FACT_SENTENCES]:
+    for fix in fixes:
         sentence = str(fix["plain_finding"]).strip().rstrip(".")
         sentences.append(sentence[0].upper() + sentence[1:] + ".")
-    return " ".join(sentences)
+    return (" ".join(sentences[:MAX_FACT_SENTENCES]), " ".join(sentences))
 
 
 def _band(name: str) -> str:
@@ -985,8 +1203,12 @@ class Narrator:
         "found" is written here from the findings, whatever the model says.
         """
         if facts is None:
-            facts = section_facts(section_name, section, self.default_whole)
-        fallback = templated_section(section_name, section, facts)
+            facts, rows, everything = section_facts_parts(
+                section_name, section, self.default_whole)
+        else:
+            rows, everything = [], facts
+        fallback = templated_section(section_name, section, facts,
+                                     also_found=rows)
         if not self.use_ai:
             return _clean_section(fallback, limit)
 
@@ -994,7 +1216,7 @@ class Narrator:
         prompt = (
             f"Section: {section_name.replace('_', ' ')}.\n\n"
             f"What we found, already written and already in the document:\n"
-            f"{facts}\n\n"
+            f"{everything}\n\n"
             f"The data behind it, for context only:\n"
             + json.dumps(curated, indent=2, ensure_ascii=False)[:12000]
             + "\n\nReturn only why it matters and what to do.")
@@ -1036,13 +1258,15 @@ class Narrator:
                 })
                 return _clean_section(fallback, limit)
 
-        # Jargon guard: a word the glossary does not carry is worth one more
-        # call, and no more than one.
-        hits = find_jargon(parsed.get("why"), parsed.get("todo"))
+        # Word guard: jargon the glossary does not carry, and empty words.
+        # Spelling is corrected in place first, because no spelling is worth
+        # a second call. What is left is worth exactly one.
+        parsed = _to_british_section(parsed)
+        hits = _word_problems(parsed)
         if hits:
             self.usage.guard_events.append({
                 "section": section_name,
-                "reason": f"jargon in the model's text: {', '.join(hits)}",
+                "reason": f"words the report does not use: {', '.join(hits)}",
                 "action": "regenerated once",
             })
             try:
@@ -1053,12 +1277,13 @@ class Narrator:
                 retry = None
             if retry is None or _is_truncated(retry, finish):
                 retry = None
-            still = find_jargon(retry.get("why"),
-                               retry.get("todo")) if retry else hits
+            else:
+                retry = _to_british_section(retry)
+            still = _word_problems(retry) if retry else hits
             if still:
                 self.usage.guard_events.append({
                     "section": section_name,
-                    "reason": f"jargon again: {', '.join(still)}",
+                    "reason": f"the same words again: {', '.join(still)}",
                     "action": "used the templated why and what to do",
                 })
                 parsed = {"why": fallback["why"], "todo": fallback["todo"]}
@@ -1066,7 +1291,7 @@ class Narrator:
                 parsed = retry
 
         return self._guard(section_name, parsed, section, fallback, limit,
-                           facts)
+                           facts, rows, everything)
 
     def _attempt(self, prompt: str, section_name: str):
         """One call, parsed into the three parts. None when it will not parse."""
@@ -1077,25 +1302,29 @@ class Narrator:
         return parse_sections(text), finish
 
     def _guard(self, section_name: str, parsed: Dict, section: Any,
-               fallback: Dict, limit: int, facts: str) -> Dict:
+               fallback: Dict, limit: int, facts: str,
+               rows: Optional[List[List[str]]] = None,
+               everything: Optional[str] = None) -> Dict:
         """Facts from us, dashes out, invented numbers out, our work out.
 
         Whatever the model returned under "found" is dropped on the floor:
         the findings paragraph is written by code.
         """
+        everything = everything or facts
         out = {"found": facts,
+               "also_found": rows or [],
                "why": strip_dashes(parsed.get("why", "")),
                "todo": [strip_dashes(t) for t in parsed.get("todo", [])
                         if str(t).strip()][:MAX_TODO_ITEMS]}
 
         dropped_all: List[str] = []
-        kept, dropped = check_numbers(out["why"], section, facts)
+        kept, dropped = check_numbers(out["why"], section, everything)
         out["why"] = kept
         dropped_all.extend(dropped)
 
         kept_todo = []
         for item in out["todo"]:
-            _kept, dropped = check_numbers(item, section, facts)
+            _kept, dropped = check_numbers(item, section, everything)
             if dropped:
                 dropped_all.extend(dropped)
             else:

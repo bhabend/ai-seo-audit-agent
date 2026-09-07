@@ -24,6 +24,7 @@ import sys
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
+from .findings import template_words
 from .issues import label_of, unit_of
 from .narrative import Narrator, strip_dashes
 
@@ -228,7 +229,8 @@ def build_charts(findings: Dict) -> Dict[str, Any]:
                 pie_title("Performance coverage", whole, "pages parsed"))
         measured = performance.get("templates_measured") or []
         charts["performance_bar"] = (
-            _barh([(m["template"], m["mobile_score"]) for m in measured
+            _barh([(m.get("template_words") or m["template"],
+                    m["mobile_score"]) for m in measured
                    if m.get("mobile_score") is not None],
                   "Mobile performance score by template",
                   "Score out of 100"),
@@ -264,6 +266,14 @@ def _add_section_body(document, parts: Dict) -> None:
         paragraph = document.add_paragraph()
         paragraph.add_run("What we found. ").bold = True
         paragraph.add_run(strip_dashes(found))
+    also = [row for row in (parts.get("also_found") or []) if row]
+    if also:
+        # The findings that did not fit the paragraph. They are not lesser
+        # findings, they are the ones a reader would rather scan than read.
+        paragraph = document.add_paragraph()
+        paragraph.add_run("Also found.").bold = True
+        _add_table(document, ["Finding", "Count"],
+                   [[str(row[0]), str(row[1])] for row in also])
     if why:
         paragraph = document.add_paragraph()
         paragraph.add_run("Why it matters. ").bold = True
@@ -457,8 +467,10 @@ def build_document(findings: Dict, narrator: Narrator, charts: Dict,
     broken = (links.get("broken_internal") or {}).get("groups") or []
     if broken:
         document.add_heading("Broken internal link groups", level=2)
-        _add_table(document, ["Pattern", "Targets", "Links pointing there"],
-                   [[g["pattern"], g["targets"], g["link_instances"]]
+        _add_table(document,
+                   ["Where they are", "Addresses", "Links pointing there"],
+                   [[template_words(g["pattern"]), g["targets"],
+                     g["link_instances"]]
                     for g in broken[:APPENDIX_ROWS]])
 
     lowest = (findings.get("headline") or {}).get("lowest_pages") or []
@@ -472,9 +484,14 @@ def build_document(findings: Dict, narrator: Narrator, charts: Dict,
     measured = (findings.get("performance") or {}).get("templates_measured")
     if measured:
         document.add_heading("Templates measured for speed", level=2)
-        _add_table(document, ["Template", "Pages", "Mobile", "Desktop"],
-                   [[m["template"], m["group_size"], m["mobile_score"],
-                     m["desktop_score"]] for m in measured[:APPENDIX_ROWS]])
+        document.add_paragraph(strip_dashes(
+            "The shape column is how the audit tool names each template. It "
+            "is here for whoever maintains the site."))
+        _add_table(document,
+                   ["Template", "Shape", "Pages", "Mobile", "Desktop"],
+                   [[m.get("template_words") or m["template"], m["template"],
+                     m["group_size"], m["mobile_score"], m["desktop_score"]]
+                    for m in measured[:APPENDIX_ROWS]])
     return document
 
 
@@ -517,6 +534,28 @@ def _sections_missing_parts(document) -> List[str]:
     return missing
 
 
+SHAPE_COLUMN = ("Template", "Shape")
+
+
+def _client_texts(document) -> List[str]:
+    """Everything a client reads, minus the appendix shape column.
+
+    That column is the one place a template may be named the way the tool
+    names it, because that is who it is for. Every other cell in every other
+    table is client text, including the appendix tables.
+    """
+    texts = [p.text for p in document.paragraphs]
+    for table in document.tables:
+        header = [c.text.strip() for c in table.rows[0].cells]
+        exempt = (header[:2] == list(SHAPE_COLUMN)) and 1 or None
+        for index, row in enumerate(table.rows):
+            for column, cell in enumerate(row.cells):
+                if exempt is not None and index and column == exempt:
+                    continue
+                texts.append(cell.text)
+    return texts
+
+
 def validate(path: str, expected_headings: List[str],
              expected_images: int) -> List[str]:
     """Reopen the file and check it. Raises with the failing check named."""
@@ -553,6 +592,14 @@ def validate(path: str, expected_headings: List[str],
         lowered = text.lower()
         if any(p.lower() in lowered for p in PLACEHOLDERS):
             problems.append(f"placeholder text present: {text[:70]!r}")
+            break
+
+    # A template shape is right for the tool and wrong for a client. It is
+    # allowed in one place only: the appendix column that exists to give the
+    # site's developers the name the audit uses.
+    for text in _client_texts(document):
+        if "{" in text or "(depth" in text:
+            problems.append(f"template shape in client text: {text[:70]!r}")
             break
 
     # Every heading must be followed by something before the next heading.

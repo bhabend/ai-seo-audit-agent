@@ -59,6 +59,8 @@ def test_the_found_paragraph_names_every_finding_the_section_has():
     facts = section_facts("on_page", section, 842)
 
     # Every finding with a count is stated, with its own count and whole.
+    # Six of them are sentences in the paragraph and the rest are rows in
+    # the "Also found" table; section_facts is both halves together.
     assert "3 of 842 pages have no page title" in facts
     assert "251 of 842 pages have a search description that will be cut" \
         in facts
@@ -260,7 +262,8 @@ def test_jargon_sends_the_section_back_exactly_once(monkeypatch):
 
     assert narrator.usage.calls == 2
     assert parts["why"] == "Visitors reach a dead end."
-    event = [e for e in narrator.usage.guard_events if "jargon" in e["reason"]]
+    event = [e for e in narrator.usage.guard_events
+             if "words the report does not use" in e["reason"]]
     assert event[0]["action"] == "regenerated once"
     assert "crawl waste" in event[0]["reason"]
 
@@ -290,12 +293,19 @@ def test_the_glossary_carries_the_two_terms_the_report_now_uses():
 # --- item 5 and 6: advice about the audit ------------------------------------
 
 def test_advice_about_the_audit_is_not_advice_for_the_client():
+    """Matched as phrases about our measuring, not as words.
+
+    The first version of this rule matched the bare word "audit" and threw
+    away "Audit and reduce third party scripts", which was real advice.
+    """
     assert is_about_the_audit(
         "Expand measurement to the 125 unmeasured templates.")
     assert is_about_the_audit("Re-run the audit after the fixes land.")
-    assert is_about_the_audit("Crawl the rest of the site next time.")
+    assert is_about_the_audit("Crawl the site again next time.")
     assert not is_about_the_audit(
         "Reduce image sizes on the location template.")
+    assert not is_about_the_audit(
+        "Audit and reduce third party scripts on high traffic templates.")
 
     kept, dropped = filter_todo([
         "Expand measurement to the unmeasured templates.",

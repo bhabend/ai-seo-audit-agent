@@ -546,6 +546,44 @@ def _links(summary: Dict, issues_by_type: Dict[str, List[Dict]],
     }
 
 
+_DEPTH_SUFFIX = re.compile(r"\s*\(depth (\d+)\)\s*$")
+_PLACEHOLDER_SEGMENT = re.compile(r"^\{[a-z]+\}$")
+
+
+def template_words(shape: str) -> str:
+    """A URL shape said as words, for a client who never sees our tokens.
+
+    "/workspaces/{slug} (depth 4)" is exactly right for choosing what to
+    measure and exactly wrong in a sentence a marketing lead reads. The shape
+    stays in findings.json for the developers; this is what the report says.
+    """
+    text = str(shape or "").strip()
+    if not text:
+        return ""
+    depth = None
+    match = _DEPTH_SUFFIX.search(text)
+    if match:
+        depth = int(match.group(1))
+        text = text[:match.start()]
+    text = text.replace("(homepage)", "").strip()
+
+    query = ""
+    if "?" in text:
+        text, _, params = text.partition("?")
+        query = " with a filter" if params.strip() else ""
+
+    segments = [s for s in text.split("/") if s]
+    named = [s.replace("-", " ").replace("_", " ").lower() for s in segments
+             if not _PLACEHOLDER_SEGMENT.match(s)]
+    if not named:
+        return "home page" if not segments else "pages" + query
+
+    words = ", ".join(named) + " pages" + query
+    if depth:
+        words += f", {depth} levels deep"
+    return words
+
+
 def _round_ms(value: Any) -> Optional[int]:
     try:
         return int(round(float(value)))
@@ -558,6 +596,13 @@ def _round_to(value: Any, places: int) -> Optional[float]:
         return round(float(value), places)
     except (TypeError, ValueError):
         return None
+
+
+def _worst_template(worst: Any) -> Any:
+    """The slowest template, with its words next to its shape."""
+    if isinstance(worst, dict) and worst.get("template"):
+        return {**worst, "template_words": template_words(worst["template"])}
+    return worst
 
 
 def _performance(summary: Dict, pagespeed: List[Dict],
@@ -576,8 +621,10 @@ def _performance(summary: Dict, pagespeed: List[Dict],
         mobile = strategies.get("mobile", {})
         desktop = strategies.get("desktop", {})
         sampled_templates.add(mobile.get("template") or desktop.get("template"))
+        shape = mobile.get("template") or desktop.get("template")
         measured.append({
-            "template": mobile.get("template") or desktop.get("template"),
+            "template": shape,
+            "template_words": template_words(shape),
             "url": url,
             "group_size": _int(mobile.get("group_size")),
             "mobile_score": _int(mobile.get("performance_score"), None)
@@ -597,7 +644,8 @@ def _performance(summary: Dict, pagespeed: List[Dict],
 
     # Which templates never got measured, and how many pages they cover.
     all_templates = Counter(template_of(p["final_url"]) for p in pages)
-    unmeasured = [{"template": t, "pages": c}
+    unmeasured = [{"template": t, "template_words": template_words(t),
+                   "pages": c}
                   for t, c in all_templates.most_common()
                   if t not in sampled_templates]
 
@@ -628,7 +676,7 @@ def _performance(summary: Dict, pagespeed: List[Dict],
             sum(u["pages"] for u in unmeasured), parsed, "pages parsed"),
         "mean_mobile_score": block.get("mean_mobile_score"),
         "mean_desktop_score": block.get("mean_desktop_score"),
-        "worst_template": block.get("worst_template_mobile"),
+        "worst_template": _worst_template(block.get("worst_template_mobile")),
         "attempts": block.get("pagespeed_attempts"),
         "attempts_ceiling": block.get("pagespeed_attempts_ceiling"),
         "measurements": block.get("pagespeed_calls"),

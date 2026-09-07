@@ -375,16 +375,24 @@ Five guards run on what it does return:
    the banned words and the phrasing to use instead: preferred address,
    hidden from search, secure connection enforced, language version, page
    title, search description.
-3. **Advice about the audit is dropped.** An action mentioning measuring,
-   sampling, unmeasured templates, re running or crawling further is work for
-   us, not for the client. If every action goes, the templated action is used,
-   so a section is never left without one.
-4. **Every number must already be in that section** or in the facts paragraph
-   we wrote. Any sentence carrying a figure that is not is dropped. The
-   finding itself is never at risk: it is in the paragraph above, written
-   from the data.
-5. **A cut off answer is regenerated once**, and **length is capped** per
-   section, because a section that runs long buries the finding.
+3. **Advice about the audit is dropped.** An action about our own measuring
+   goes: "expand measurement", "unmeasured templates", "re run the audit",
+   "crawl the site again". These are matched as phrases, not as words, so
+   "Audit and reduce third party scripts" survives, which it did not when the
+   rule matched the bare word "audit". If every action goes, the templated
+   action is used, so a section is never left without one.
+4. **British spelling, and no empty words.** American z spellings are
+   corrected in place, because no spelling is worth a second call. "Leverage",
+   "robust", "ensure", "impactful", "best practices", "seamless" and the rest
+   are not corrected: they mean the sentence has to be written again, so the
+   section is regenerated once and then falls back to the templated wording.
+5. **Every number must already be in that section** or in the facts we
+   wrote. Any sentence carrying a figure that is not is dropped. The finding
+   itself is never at risk: it is in the paragraph above, written from the
+   data.
+6. **A cut off answer is regenerated once**, and the model's own prose is
+   **length capped** per section. The findings paragraph is never word capped,
+   because every sentence in it is a finding.
 
 Every drop, regeneration and fallback is recorded in `report_usage.json` under
 `guard_events`.
@@ -394,6 +402,24 @@ paragraph written by code, a "Why it matters" paragraph, and "What to do" as
 a numbered list. The model is told never to define a term, because a
 **glossary written by code** sits right after the executive summary and does
 the defining once.
+
+**Six findings make a paragraph; the rest make a table.** A section with ten
+findings was a list wearing a paragraph's clothes, so the six worst are said
+in sentences and the others follow immediately in an **"Also found"** table of
+Finding and Count, each count stating its whole. Nothing is dropped: every
+finding is in exactly one of the two, and the model is handed all of them
+either way.
+
+**Templates are named in words.** The sampler thinks in shapes, so a template
+is `/workspaces/{slug} (depth 4)`. The report says "workspaces pages, 4 levels
+deep", in the sentences, the tables and the chart. The shape stays in
+`findings.json` and in one appendix column for whoever maintains the site, and
+validation refuses a brace or a "(depth" anywhere else in the document.
+
+**Done means done.** A report leaves the build client ready: every number next
+to the right noun, no identifiers or shapes or jargon outside that appendix
+column, no section cut off or empty, British spelling, no action about our own
+measuring, and every count stating its whole.
 
 **Identifiers never reach the page.** Every issue type carries a plain label
 ("page title missing", not `title_missing`) and a one sentence finding. The
