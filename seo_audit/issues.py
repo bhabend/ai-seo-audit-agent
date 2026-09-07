@@ -196,7 +196,7 @@ PAGE_ISSUE_META: Dict[str, tuple] = {
                            "{count} of {whole} pages name a different page as "
                            "the preferred one", "page"),
     "canonical_consolidates_variant": (
-        "canonical points variant to its clean page",
+        "preferred address points a variant to its clean page",
         "{count} of {whole} pages correctly point a filtered or tracked "
         "address back to their clean address", "page"),
     "canonical_not_absolute": ("preferred address written as a partial link",

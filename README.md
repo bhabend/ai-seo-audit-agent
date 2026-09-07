@@ -350,30 +350,50 @@ never loses the report: the remaining sections are written from the data. A 429 
 nor quietly downgraded to another model. Every call's tokens are summed into
 `report_usage.json` alongside the model name.
 
-**Numbers come from code, prose comes from the model.** The model is handed
-one section of `findings.json` and nothing else, never a raw CSV, and three
-guards run on whatever it returns:
+**The findings are written by code. The model only explains them.** Every
+"What we found" paragraph, the executive summary's included, is built here
+from `findings.json`: each issue type with a count above zero, said through
+its own plain sentence with its own count and its own whole, worst severity
+first, anything the site already does right in one sentence at the end, and
+**zero counts left out entirely**. The model is never asked what was found,
+so a right number can never end up attached to the wrong noun and no section
+can open on something that was not found. The summary's facts are the score,
+the pages scored, any site wide deduction, the spread of page scores and the
+five biggest fixes by name.
+
+The model is handed that paragraph plus the section's curated data and asked
+for two things only: `why` and `todo`. A `found` key in its answer is ignored.
+Five guards run on what it does return:
 
 1. **Dashes are removed.** Em dashes, en dashes, hyphens used with spaces and
    bullet markers at the start of a line become commas or full stops. Hyphens
    inside words and URLs are data and stay.
-2. **Every number must already be in that section.** Any sentence carrying a
-   figure that is not in the data is dropped, and **the finding it described
-   is restated from the data**, naming the issue and its examples. A dropped
-   sentence must never lose a finding. Each drop is recorded in
-   `report_usage.json` under `guard_events` with the issues restated.
-3. **A cut off answer is regenerated once.** If the model reports it ran out
-   of room, or a paragraph or action item does not end in punctuation, the
-   section is asked for again. If it is still incomplete the templated
-   section is used, and both are logged.
-4. **Length is capped** per section, because a section that runs long buries
-   the finding.
+2. **Jargon is refused.** A banned list (equity, crawl budget, crawl waste,
+   SERP, indexation, hreflang, HSTS, noindex, canonical, Lighthouse and the
+   rest) is checked on `why` and `todo`. A hit sends the section back once;
+   a second hit falls back to the templated wording. The style sheet names
+   the banned words and the phrasing to use instead: preferred address,
+   hidden from search, secure connection enforced, language version, page
+   title, search description.
+3. **Advice about the audit is dropped.** An action mentioning measuring,
+   sampling, unmeasured templates, re running or crawling further is work for
+   us, not for the client. If every action goes, the templated action is used,
+   so a section is never left without one.
+4. **Every number must already be in that section** or in the facts paragraph
+   we wrote. Any sentence carrying a figure that is not is dropped. The
+   finding itself is never at risk: it is in the paragraph above, written
+   from the data.
+5. **A cut off answer is regenerated once**, and **length is capped** per
+   section, because a section that runs long buries the finding.
 
-**Sections have a shape.** Each asks the model for three parts and renders
-them as three: a "What we found" paragraph, a "Why it matters" paragraph, and
-"What to do" as a numbered list. The model is told never to define a term and
-never to describe how anything was measured, because a **glossary written by
-code** sits right after the executive summary and does the defining once.
+Every drop, regeneration and fallback is recorded in `report_usage.json` under
+`guard_events`.
+
+**Sections have a shape.** Each renders as three parts: a "What we found"
+paragraph written by code, a "Why it matters" paragraph, and "What to do" as
+a numbered list. The model is told never to define a term, because a
+**glossary written by code** sits right after the executive summary and does
+the defining once.
 
 **Identifiers never reach the page.** Every issue type carries a plain label
 ("page title missing", not `title_missing`) and a one sentence finding. The
@@ -381,10 +401,17 @@ data handed to the model is curated first: internal keys such as fingerprints
 and thresholds are stripped, and identifiers are swapped for their labels, so
 the model cannot repeat one back even if it wanted to.
 
-**A count says what it counts.** A fix affecting broken links reports both the
-pages that link to them and the targets themselves, because "118 of 842 pages"
-was never 118 pages. Fix scope is `one setting`, `one template` or `page by
-page`, decided by whether the affected pages share a URL shape.
+**A count says what it counts.** A fix affecting broken links reports the
+broken things first and the pages linking to them second: "118 of 1000 links
+to other websites checked, linked from 834 of 842 pages parsed". The whole for
+a broken internal address is the addresses this crawl reached, never the
+number of links between them, because "53 of 106768 internal link targets"
+divided one kind of thing by another. Fix scope is `one setting`, `one
+template` or `page by page`: site wide settings are one setting, and work is
+template work when the three commonest URL shapes cover 70% or more of the
+affected pages, because 251 missing search descriptions across a blog, a
+location and a workspace template are three template edits and not 251 page
+edits.
 
 **A canonical that consolidates is not a fault.** A filtered or tracked
 address naming its clean page is the site doing the right thing; it is

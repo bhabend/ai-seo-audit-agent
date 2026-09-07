@@ -252,9 +252,10 @@ def test_what_to_do_is_a_numbered_list_in_the_saved_file(run_dir):
     assert "List Number" in styles
 
 
-def test_the_style_forbids_defining_terms():
+def test_the_style_forbids_defining_terms_and_advising_on_the_audit():
     assert "Never define a term" in narr.STYLE
-    assert "Never describe how anything was measured" in narr.STYLE
+    assert "Never advise anything about this audit itself" in narr.STYLE
+    assert "You are not asked what was found" in narr.STYLE
 
 
 # --- item 7: truncation ------------------------------------------------------
@@ -267,9 +268,8 @@ def framed(content, finish="stop"):
 
 def test_a_length_finish_reason_triggers_exactly_one_regeneration(monkeypatch):
     monkeypatch.setattr(narr.time, "sleep", lambda s: None)
-    cut = framed('{"found": "A truncated", "why": "B.", "todo": ["C."]}',
-                 "length")
-    good = framed('{"found": "A.", "why": "B.", "todo": ["C."]}')
+    cut = framed('{"why": "A truncated", "todo": ["C."]}', "length")
+    good = framed('{"why": "B.", "todo": ["C."]}')
 
     with requests_mock.Mocker() as mock:
         mock.post(API_URL, [{"json": cut}, {"json": good}])
@@ -277,21 +277,21 @@ def test_a_length_finish_reason_triggers_exactly_one_regeneration(monkeypatch):
         parts = narrator.write("links", {"a": 1})
 
     assert narrator.usage.calls == 2
-    assert parts["found"] == "A."
+    assert parts["why"] == "B."
     assert narrator.usage.as_dict()["regenerations"] == 1
 
 
 def test_a_sentence_that_never_ends_counts_as_truncated(monkeypatch):
     monkeypatch.setattr(narr.time, "sleep", lambda s: None)
-    cut = framed('{"found": "We looked at the", "why": "B.", "todo": ["C."]}')
-    good = framed('{"found": "A.", "why": "B.", "todo": ["C."]}')
+    cut = framed('{"why": "We looked at the", "todo": ["C."]}')
+    good = framed('{"why": "B.", "todo": ["C."]}')
 
     with requests_mock.Mocker() as mock:
         mock.post(API_URL, [{"json": cut}, {"json": good}])
         narrator = Narrator(key="k", session=requests.Session())
         parts = narrator.write("links", {"a": 1})
 
-    assert parts["found"] == "A."
+    assert parts["why"] == "B."
     assert narrator.usage.calls == 2
 
 
@@ -348,7 +348,7 @@ def test_a_section_missing_a_part_fails_validation(run_dir, tmp_path):
 
 # --- item 8: a dropped sentence must not lose the finding --------------------
 
-def test_a_dropped_sentence_is_replaced_by_the_finding_itself(monkeypatch):
+def test_a_dropped_sentence_never_costs_the_finding(monkeypatch):
     """The five blog posts with a broken preferred address must survive."""
     monkeypatch.setattr(narr.time, "sleep", lambda s: None)
     section = {"canonical": {"issue_type": "canonical_target_non_200",
@@ -356,21 +356,22 @@ def test_a_dropped_sentence_is_replaced_by_the_finding_itself(monkeypatch):
                                                 "whole_is": "pages parsed"},
                              "evidence": [{"final_url": f"{HOST}/blogs/one"},
                                           {"final_url": f"{HOST}/blogs/two"}]}}
-    body = ('{"found": "Exactly 987654 pages are broken.", '
-            '"why": "It matters.", "todo": ["Fix it."]}')
+    body = ('{"why": "Exactly 987654 pages are broken. It matters.", '
+            '"todo": ["Fix it."]}')
 
     with requests_mock.Mocker() as mock:
         mock.post(API_URL, json=completion(body))
         narrator = Narrator(key="k", session=requests.Session())
         parts = narrator.write("indexability_technical", section)
 
-    assert "987654" not in parts["found"]
+    assert "987654" not in parts["why"]
+    assert "It matters." in parts["why"]
+    # The finding is written by code, so nothing the guard drops can lose it.
     assert "preferred address that does not load" in parts["found"]
     assert "5 of 842" in parts["found"]
-    assert f"{HOST}/blogs/one" in parts["found"]
     event = [e for e in narrator.usage.guard_events
-             if e.get("types_restated")][0]
-    assert "preferred address is broken" in event["types_restated"]
+             if e.get("sentences_dropped")][0]
+    assert event["section"] == "indexability_technical"
 
 
 # --- item 9: curation and rounding -------------------------------------------
@@ -466,20 +467,19 @@ def test_findings_named_as_keys_are_restated_too():
         in text
 
 
-def test_a_dropped_sentence_restates_key_shaped_findings(monkeypatch):
+def test_key_shaped_findings_are_stated_by_code(monkeypatch):
     monkeypatch.setattr(narr.time, "sleep", lambda s: None)
     section = {"canonical": {"canonical_target_non_200": {
         "count": 5, "whole": 842, "whole_is": "pages parsed"}}}
-    body = ('{"found": "Exactly 987654 pages are affected.", '
-            '"why": "It matters.", "todo": ["Fix it."]}')
+    body = ('{"why": "Exactly 987654 pages are affected.", '
+            '"todo": ["Fix it."]}')
 
     with requests_mock.Mocker() as mock:
         mock.post(API_URL, json=completion(body))
         narrator = Narrator(key="k", session=requests.Session())
         parts = narrator.write("indexability_technical", section)
 
-    assert "987654" not in parts["found"]
+    assert "987654" not in parts["why"]
     assert "5 of 842 pages point to a preferred address" in parts["found"]
-    event = [e for e in narrator.usage.guard_events
-             if e.get("types_restated")][0]
-    assert event["types_restated"] == ["preferred address is broken"]
+    assert [e for e in narrator.usage.guard_events
+            if e.get("sentences_dropped")]

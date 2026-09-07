@@ -79,6 +79,10 @@ GLOSSARY = [
      "someone taps or clicks."),
     ("Template", "A page layout shared by many pages, such as every blog "
      "post or every location page."),
+    ("Page title", "The line a search engine shows as the clickable heading "
+     "for a page, taken from the page's title."),
+    ("Search description", "The short summary a page offers for search "
+     "engines to show under its title, also called a meta description."),
 ]
 
 
@@ -373,13 +377,17 @@ def _fixes_table_rows(fixes: List[Dict]) -> List[List[str]]:
     rows = []
     for fix in fixes[:TOP_FIXES]:
         affected = fix.get("pages_affected") or {}
-        scale = (f"{affected.get('count', 0)} of {affected.get('whole', 0)} "
+        pages = (f"{affected.get('count', 0)} of {affected.get('whole', 0)} "
                  f"{affected.get('whole_is', 'pages')}")
         targets = fix.get("targets")
         if targets:
-            # "118 of 842 pages" was 118 external links. Say which is which.
-            scale += (f" ({targets['count']} of {targets['whole']} "
-                      f"{targets['whole_is']})")
+            # "118 of 842 pages" was 118 external links, and the pages are
+            # the pages linking to them. The broken things come first and
+            # the pages follow, so neither number can be read as the other.
+            scale = (f"{targets['count']} of {targets['whole']} "
+                     f"{targets['whole_is']}, linked from {pages}")
+        else:
+            scale = pages
         rows.append([
             fix.get("title", ""),
             scale,
@@ -458,7 +466,7 @@ def build_document(findings: Dict, narrator: Narrator, charts: Dict,
         document.add_heading("Lowest scoring pages", level=2)
         _add_table(document, ["Page", "Score", "Main issue"],
                    [[p["final_url"], p["score"],
-                     str(p.get("top_issue") or "").replace("_", " ")]
+                     label_of(p["top_issue"]) if p.get("top_issue") else ""]
                     for p in lowest[:APPENDIX_ROWS]])
 
     measured = (findings.get("performance") or {}).get("templates_measured")
@@ -619,7 +627,10 @@ def generate(run_dir: str, model: str = "gpt-5-mini", use_ai: bool = True,
 
     host = (findings.get("meta") or {}).get("host") or "site"
     charts = build_charts(findings)
-    narrator = Narrator(model=model, use_ai=use_ai, session=session)
+    parsed = ((findings.get("meta") or {}).get("coverage") or {}).get(
+        "pages_parsed", 0)
+    narrator = Narrator(model=model, use_ai=use_ai, session=session,
+                        default_whole=parsed)
 
     document = build_document(findings, narrator, charts, host)
     name = f"SEO_Audit_{host}_{date.today().isoformat()}.docx"

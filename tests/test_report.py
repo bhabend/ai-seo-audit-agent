@@ -97,22 +97,25 @@ def test_a_share_licenses_its_own_percentage():
     assert "20%" in kept
 
 
-def test_the_guard_logs_the_drop_and_falls_back_to_the_template(tmp_path):
-    section = {"pages": {"count": 40, "whole": 842, "whole_is": "pages"}}
+def test_the_guard_logs_the_drop_and_the_finding_survives(tmp_path):
+    """The number guard now runs on the model's half: why and what to do."""
+    section = {"orphan_page": {"count": 40, "whole": 842,
+                               "whole_is": "pages parsed"}}
     with requests_mock.Mocker() as mock:
         mock.post(API_URL, json=completion(
-            '{"found": "Exactly 123456 pages are broken.", '
-            '"why": "It matters.", "todo": ["Fix it."]}'))
+            '{"why": "Exactly 123456 pages are broken. It matters.", '
+            '"todo": ["Fix it."]}'))
         narrator = Narrator(key="k", session=requests.Session())
         text = narrator.write("links", section)
 
-    assert "123456" not in text["found"]
+    assert "123456" not in text["why"]
+    assert "It matters." in text["why"]
     event = [e for e in narrator.usage.guard_events
              if "sentences_dropped" in e][0]
     assert event["section"] == "links"
     assert event["sentences_dropped"] == 1
-    # The replacement states the real figure instead.
-    assert "40 of 842" in text["found"]
+    # The finding is stated by code, so it was never at risk.
+    assert "40 of 842 pages have no links" in text["found"]
 
 
 # --- calls, retries, refusals ------------------------------------------------
@@ -123,12 +126,12 @@ def test_a_rate_limit_is_retried_once(monkeypatch):
         mock.post(API_URL, [{"status_code": 429, "text": "slow down"},
                             {"status_code": 200,
                              "json": completion(
-                                 '{"found": "All is well.", '
-                                 '"why": "B.", "todo": ["C."]}')}])
+                                 '{"why": "All is well.", '
+                                 '"todo": ["C."]}')}])
         narrator = Narrator(key="k", session=requests.Session())
         text = narrator.write("on_page", {"a": 1})
 
-    assert "All is well." in text["found"]
+    assert "All is well." in text["why"]
     assert narrator.usage.calls == 2
 
 
@@ -169,8 +172,7 @@ def test_the_call_ceiling_degrades_to_templates_rather_than_failing():
 def test_a_whole_report_never_exceeds_the_call_ceiling(run_dir):
     with requests_mock.Mocker() as mock:
         mock.post(API_URL, json=completion(
-            '{"found": "A plain sentence about the site.", '
-            '"why": "It matters here.", "todo": ["Do the thing."]}'))
+            '{"why": "It matters here.", "todo": ["Do the thing."]}'))
         result = generate(run_dir, use_ai=True, session=requests.Session())
 
     usage = result["usage_data"]

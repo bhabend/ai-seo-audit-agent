@@ -477,6 +477,8 @@ def _schema(summary: Dict, issues_by_type: Dict[str, List[Dict]],
         },
         "type_counts": _dig(summary, "schema_type_counts", default={}),
         "invalid_json": len(issues_by_type.get("schema_invalid_json", [])),
+        "missing_property_pages": len(
+            issues_by_type.get("schema_missing_property", [])),
         "missing_properties": [
             {"detail": detail, "pages_affected": count}
             for detail, count in missing_props.most_common(MAX_EVIDENCE)
@@ -643,47 +645,47 @@ FIX_TITLES = {
     "redirected_internal_link": "Point internal links straight at the page they end up on",
     "orphan_page": "Add internal links to pages nothing links to",
     "low_inlink_page": "Give pages with a single internal link more routes in",
-    "hreflang_not_reciprocal": "Make language alternates point back at each other",
-    "meta_description_missing": "Write meta descriptions for pages without one",
-    "meta_description_too_long": "Shorten meta descriptions that get cut off",
+    "hreflang_not_reciprocal": "Make language versions point back at each other",
+    "meta_description_missing": "Write a search description for pages without one",
+    "meta_description_too_long": "Shorten search descriptions that get cut off",
     "title_missing": "Add page titles where there are none",
     "title_too_long": "Shorten page titles that get cut off in results",
     "title_too_short": "Give short page titles more to say",
     "h1_missing": "Add a main heading to pages without one",
     "h1_multiple": "Leave one main heading per page",
-    "images_missing_alt": "Describe images that have no alt text",
+    "images_missing_alt": "Describe the images that have no description",
     "thin_page": "Add substance to pages with very little text",
     "duplicate_content": "Resolve pages whose text is identical",
     "near_duplicate_content": "Differentiate pages that read almost the same",
     "duplicate_title": "Give pages that share a title their own",
-    "duplicate_meta_description": "Give pages that share a description their own",
+    "duplicate_meta_description": "Give pages that share a search description their own",
     "schema_missing": "Add structured data to pages that have none",
     "schema_invalid_json": "Repair structured data that fails to parse",
     "schema_missing_property": "Complete structured data that is missing required fields",
-    "schema_microdata_only": "Move structured data from microdata to JSON-LD",
-    "canonical_missing": "Add a canonical link to pages without one",
-    "canonical_off_page": "Point canonicals at the page they are on",
-    "canonical_not_absolute": "Write canonicals as full URLs",
-    "canonical_chain": "Point canonicals straight at the final page",
-    "canonical_target_non_200": "Repoint canonicals that lead to missing pages",
-    "canonical_target_noindex": "Repoint canonicals that lead to hidden pages",
-    "canonical_target_not_crawled": "Check canonicals that lead outside the crawl",
-    "canonical_target_unchecked": "Raise the canonical check limit to cover the rest",
-    "noindex_page": "Confirm the pages marked hidden are meant to be hidden",
-    "nofollow_page": "Confirm the pages marked nofollow are meant to be",
-    "viewport_missing": "Add a viewport tag so pages work on phones",
+    "schema_microdata_only": "Move structured data into the current format",
+    "canonical_missing": "Name a preferred address on pages without one",
+    "canonical_off_page": "Point each preferred address at the page it is on",
+    "canonical_not_absolute": "Write preferred addresses as full addresses",
+    "canonical_chain": "Point preferred addresses straight at the final page",
+    "canonical_target_non_200": "Repoint preferred addresses that lead to missing pages",
+    "canonical_target_noindex": "Repoint preferred addresses that lead to hidden pages",
+    "canonical_target_not_crawled": "Check preferred addresses that lead to pages this audit did not reach",
+    "canonical_target_unchecked": "Check the preferred addresses left over",
+    "noindex_page": "Confirm the pages hidden from search are meant to be",
+    "nofollow_page": "Confirm the pages that block link following are meant to",
+    "viewport_missing": "Add the mobile layout setting so pages work on phones",
     "html_lang_missing": "Declare the page language",
-    "mixed_content": "Load every resource over https",
+    "mixed_content": "Load every file over a secure connection",
     "external_link_broken": "Repair or remove links to pages that have gone",
     "generic_anchor": "Replace vague link text with words describing the page",
-    "nofollow_internal_link": "Remove nofollow from internal links",
+    "nofollow_internal_link": "Let search engines follow internal links",
     "sitemap_noindex": "Take hidden pages out of the sitemap",
-    "sitemap_off_canonical": "List canonical pages in the sitemap",
-    "hsts_missing": "Send the HSTS header",
+    "sitemap_off_canonical": "List preferred pages in the sitemap",
+    "hsts_missing": "Tell browsers to always use a secure connection",
     "csp_missing": "Send a content security policy",
-    "x_content_type_options_missing": "Send the X-Content-Type-Options header",
-    "x_frame_options_missing": "Send the X-Frame-Options header",
-    "http_to_https_redirect": "Redirect plain http to https",
+    "x_content_type_options_missing": "Send the header that stops browsers guessing file types",
+    "x_frame_options_missing": "Send the header that stops other sites framing your pages",
+    "http_to_https_redirect": "Send the insecure address on to the secure one",
     "performance_poor": "Speed up the slowest page templates",
     "lcp_poor": "Make the largest element on the page load sooner",
     "cls_poor": "Stop the layout shifting as the page loads",
@@ -740,14 +742,17 @@ def _title_for(issue_type: str) -> str:
 
 
 TEMPLATE_CONCENTRATION = 0.7
+TEMPLATE_PATTERNS = 3
 
 
 def _fix_scope(issue_type: str, rows: List[Dict]) -> str:
     """Where the work happens: one setting, one template, or page by page.
 
     A fault on 280 pages that all share one URL shape is one template edit,
-    not 280 page edits. The old rule only said "template" when a group had
-    exactly one pattern, which almost never held for ungrouped types.
+    not 280 page edits. Counting only the largest shape was still too strict:
+    251 missing search descriptions spread over a blog, a location and a
+    workspace template are three template edits, and the report called them
+    251 page edits. So the top three shapes are counted together.
     """
     if unit_of(issue_type) == "site" or issue_type in SITE_LEVEL_TYPES:
         return "config"
@@ -755,7 +760,7 @@ def _fix_scope(issue_type: str, rows: List[Dict]) -> str:
         return "page"
     patterns = Counter(pattern_of(r.get("final_url") or r.get("url") or "")
                        for r in rows)
-    top = patterns.most_common(1)[0][1]
+    top = sum(c for _p, c in patterns.most_common(TEMPLATE_PATTERNS))
     if len(rows) > 1 and top / len(rows) >= TEMPLATE_CONCENTRATION:
         return "template"
     return "page"
@@ -790,8 +795,12 @@ def _targets_share(candidate: Dict, totals: Dict[str, int]) -> Optional[Dict]:
     if issue_type == "external_link_broken":
         return share(count, totals.get("external_checked", count) or count,
                      "links to other websites checked")
+    # The whole is the addresses on this site the crawl actually reached, not
+    # the number of links between them: "53 of 106768 internal link targets"
+    # divided a count of addresses by a count of link instances and meant
+    # nothing to anybody.
     return share(count, totals.get("internal_targets", count) or count,
-                 "internal link targets found")
+                 "internal addresses crawled")
 
 
 _REFERRER_LIST_RE = re.compile(r"linked from \d+ page\(s\): (.+)$")
@@ -894,11 +903,12 @@ def _prioritised_fixes(page_issues: List[Dict],
             "pattern": c["pattern"],
             "label": label_of(c["issue_type"]),
             "unit": unit_of(c["issue_type"]),
-            "plain_finding": plain_finding(
-                c["issue_type"],
-                c["reach"] if unit_of(c["issue_type"]) == "target"
-                else pages_affected,
-                parsed),
+            # The count is targets for a target type and pages otherwise.
+            # Passing reach here said "21372 addresses no longer load" when
+            # 53 addresses were broken and 21372 was the number of links
+            # pointing at them.
+            "plain_finding": plain_finding(c["issue_type"], pages_affected,
+                                           parsed),
             "pages_affected": _affected_share(c, pages_affected, parsed,
                                               totals),
             "targets": _targets_share(c, totals),
@@ -1096,7 +1106,8 @@ def build_findings(run_dir: str, previous_dir: Optional[str] = None,
             totals={
                 "external_checked": _dig(summary, "links", "external_checked",
                                          default=0),
-                "internal_targets": _dig(summary, "links", "edges", default=0),
+                # Addresses crawled, not link edges: see _targets_share.
+                "internal_targets": _dig(summary, "pages_found", default=0),
             }),
         "search_performance": {"provided": False},
         "comparison": (compare(run_dir, previous_dir) if compare_enabled
