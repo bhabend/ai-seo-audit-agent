@@ -972,3 +972,40 @@ def test_the_results_page_renders_the_search_tables_once_attached(
     issue_rows = report.search_issue_rows(findings["search_performance"])
     assert issue_rows in frames, "the search findings table is missing"
     assert any(metric.value == "5000" for metric in app.metric)
+
+
+# --- session 14: an Excel export reaches the command as a workbook ---------
+
+def test_an_excel_upload_keeps_its_extension_for_the_reader(tmp_path,
+                                                            monkeypatch):
+    """The reader tells the container from the suffix, so it must survive."""
+    seen = {}
+
+    class Result:
+        returncode = 0
+        stdout = "matched"
+        stderr = ""
+
+    def fake_run(command, capture_output=None, text=None, cwd=None):
+        export = command[command.index("--export") + 1]
+        seen["export"] = export
+        seen["existed"] = os.path.exists(export)
+        return Result()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    result = runner.attach_gsc(str(tmp_path), b"PK\x03\x04 not really",
+                               "Performance on Search.xlsx")
+
+    assert result["ok"]
+    assert seen["export"].endswith(".xlsx"), seen["export"]
+    assert seen["existed"], "the command was handed nothing to read"
+    assert not os.path.exists(seen["export"]), "the upload was left on disk"
+
+
+def test_the_uploader_takes_a_workbook_a_zip_or_a_csv(app_runner):
+    app = app_test().run()
+    app.sidebar.radio[0].set_value("Results").run()
+
+    uploaders = list(app.get("file_uploader"))
+    assert uploaders, "no uploader on the Results page"
+    assert "Excel" in uploaders[0].label

@@ -15,16 +15,19 @@ written back as `gsc_join.csv`, a `search_performance` block in
 `findings.json` and a handful of rows appended to `page_issues.csv`. Attach a
 second export and the previous answer is replaced rather than added to.
 
-Header names in a real export vary by locale and by which button produced it,
-so tables are found by shape rather than by name: a column that looks like an
-address, a column that looks like a query, and the click, impression, rate
-and position columns beside them.
+The export arrives in whatever container the client's Search Console offered:
+a zip of CSVs, those CSVs as a folder or a single file, or an Excel workbook
+of sheets. Header names and sheet names vary by locale, by which button
+produced them, and by stray whitespace, so tables are found by shape rather
+than by name: a column that looks like an address, a column that looks like a
+query, and the click, impression and position columns beside them.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import datetime
 import io
 import json
 import os
@@ -80,9 +83,19 @@ def _matches(header: str, words: Sequence[str]) -> bool:
 
 
 def _find_column(headers: List[str], words: Sequence[str]) -> Optional[int]:
-    for index, header in enumerate(headers):
-        if _matches(header, words):
-            return index
+    """The column these words mean, preferring the plainest match.
+
+    A real workbook carries "Rank Order" and "Ranking Bucket" beside
+    "Position", and all three contain a position word. An exact header wins,
+    then one that starts with the word, and only then any that contains it,
+    so the column named after the thing beats the columns merely about it.
+    """
+    for test in (lambda header, word: header == word,
+                 lambda header, word: header.startswith(word),
+                 lambda header, word: word in header):
+        for index, header in enumerate(headers):
+            if any(test(header, word) for word in words):
+                return index
     return None
 
 
@@ -156,9 +169,62 @@ def _read_csv_bytes(data: bytes) -> List[List[str]]:
             if any(cell.strip() for cell in row)]
 
 
-def _tables(path: str) -> List[Tuple[str, List[List[str]]]]:
-    """(name, rows) for every CSV in a zip, a folder or a single file."""
+def _cell_text(value: Any) -> str:
+    """One spreadsheet cell as the reader's rows want it: a plain string.
+
+    A date cell becomes an ISO date, so the period still sorts. A whole
+    number stays whole, because "1234.0" impressions reads as nonsense and
+    parses as a decimal. Anything empty becomes an empty string.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, float) and value != value:  # not a number
+        return ""
+    if isinstance(value, datetime.datetime):
+        return value.date().isoformat()
+    if isinstance(value, datetime.date):
+        return value.isoformat()
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def _workbook_tables(path: str) -> List[Tuple[str, List[List[str]]]]:
+    """(sheet name, rows) for every sheet of an Excel workbook.
+
+    Search Console's own Export button offers a spreadsheet as well as a zip,
+    and that is what arrives. Sheet names carry trailing spaces and the sheets
+    carry columns this reader does not want, so nothing is matched on a name:
+    every sheet is handed to the same header shape detection the CSVs go
+    through, and the extra columns are ignored there.
+    """
+    import pandas
+
+    try:
+        sheets = pandas.read_excel(path, sheet_name=None, header=None,
+                                   dtype=object, engine="openpyxl")
+    except ImportError as exc:  # pragma: no cover - openpyxl is pinned
+        raise RuntimeError(
+            "reading an Excel export needs openpyxl: pip install -r "
+            "requirements.txt") from exc
+
     out: List[Tuple[str, List[List[str]]]] = []
+    for name, frame in sheets.items():
+        rows = [[_cell_text(cell) for cell in row]
+                for row in frame.itertuples(index=False, name=None)]
+        rows = [row for row in rows if any(cell for cell in row)]
+        if rows:
+            out.append((str(name).strip(), rows))
+    return out
+
+
+def _tables(path: str) -> List[Tuple[str, List[List[str]]]]:
+    """(name, rows) for every table in a workbook, zip, folder or CSV."""
+    out: List[Tuple[str, List[List[str]]]] = []
+    if path.lower().endswith((".xlsx", ".xlsm")):
+        # Before the zip branch on purpose: a workbook is itself a zip, and
+        # one holding no CSV members would otherwise read as empty.
+        return _workbook_tables(path)
     if os.path.isdir(path):
         for name in sorted(os.listdir(path)):
             if name.lower().endswith(".csv"):
@@ -228,7 +294,7 @@ def _row_dicts(rows: List[List[str]], columns: Dict[str, Optional[int]]
 
 
 def read_export(path: str) -> Export:
-    """Read a zip, a folder or a single CSV into pages, queries and dates."""
+    """Read a workbook, zip, folder or CSV into pages, queries and dates."""
     export = Export()
     if not path or not os.path.exists(path):
         export.notes.append(f"nothing to read at {path}")
@@ -278,6 +344,12 @@ def read_export(path: str) -> Export:
         export.queries = _fold_pairs(export.pairs)
     if not export.pages and not export.queries:
         export.notes.append("no pages or searches table could be recognised")
+    elif not export.pages:
+        export.notes.append("no table of pages was recognised in the export, "
+                            "so nothing can be matched to the crawl")
+    elif not export.queries:
+        export.notes.append("no table of searches was recognised in the "
+                            "export")
     return export
 
 

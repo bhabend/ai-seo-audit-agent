@@ -538,3 +538,144 @@ def test_an_export_with_dates_states_its_period(tmp_path):
     assert block["has_period"] is True
     assert block["date_range"] == "2025-05-01 to 2026-08-31"
     assert "16 months" not in block["coverage_note"]
+
+
+# --- session 14: the export arrives as an Excel workbook --------------------
+
+def real_workbook(tmp_path, name="performance.xlsx", with_pages=True):
+    """A workbook shaped like the one Search Console actually handed over.
+
+    Sheet names carry trailing spaces, the searches sheet carries columns
+    this reader does not want, the chart sheet has two date columns and real
+    date cells, and the rate column is a fraction. None of that is matched
+    on: the sheets are found by the shape of their headers.
+    """
+    import datetime
+
+    from openpyxl import Workbook
+
+    book = Workbook()
+    book.remove(book.active)
+
+    if with_pages:
+        pages = book.create_sheet("Pages")
+        pages.append(["Top pages", "Clicks", "Impressions", "CTR",
+                      "Position"])
+        pages.append([f"{HOST}/a/", 12, 2600, 0.0046, 8.4])
+        pages.append([f"{HOST}/b/", 3, 900, 0.0033, 14.2])
+
+    queries = book.create_sheet("Queries  ")
+    queries.append(["Rank Order", "Query", "Clicks", "Impressions", "CTR",
+                    "Position", "Ranking Bucket"])
+    queries.append([1, "office space pune", 9, 1800, 0.005, 6.1, "4-10"])
+    queries.append([2, "day pass mumbai", 1, 400, 0.0025, 12.7, "11-20"])
+
+    chart = book.create_sheet("Chart")
+    chart.append(["Date", "Dates ", "Clicks", "Impressions", "CTR",
+                  "Position"])
+    chart.append([datetime.date(2025, 5, 4), "2025-05-04", 4, 120, 0.033,
+                  9.1])
+    chart.append([datetime.date(2026, 8, 31), "2026-08-31", 6, 210, 0.028,
+                  8.7])
+
+    path = str(tmp_path / name)
+    book.save(path)
+    return path
+
+
+def matching_zip(tmp_path):
+    """The same three tables as CSVs, for comparison."""
+    return export_zip(tmp_path, {
+        "Pages.csv": PAGES_TABLE + [[f"{HOST}/a/", 12, 2600, "0.46%", 8.4],
+                                    [f"{HOST}/b/", 3, 900, "0.33%", 14.2]],
+        "Queries.csv": QUERIES_TABLE + [
+            ["office space pune", 9, 1800, "0.5%", 6.1],
+            ["day pass mumbai", 1, 400, "0.25%", 12.7]],
+        "Dates.csv": [["Date", "Clicks", "Impressions"],
+                      ["2025-05-04", 4, 120], ["2026-08-31", 6, 210]]},
+        name="same.zip")
+
+
+def test_an_excel_workbook_reads_the_same_as_the_csv_zip(tmp_path):
+    book = gsc.read_export(real_workbook(tmp_path))
+    zipped = gsc.read_export(matching_zip(tmp_path))
+
+    assert book.pages == zipped.pages
+    assert book.queries == zipped.queries
+    assert book.date_range == zipped.date_range == "2025-05-04 to 2026-08-31"
+
+
+def test_the_workbook_reads_its_pages_and_searches(tmp_path):
+    export = gsc.read_export(real_workbook(tmp_path))
+
+    assert [row["url"] for row in export.pages] == [f"{HOST}/a/",
+                                                    f"{HOST}/b/"]
+    assert export.pages[0]["clicks"] == 12
+    assert export.pages[0]["impressions"] == 2600
+    assert export.pages[0]["position"] == 8.4
+    # The rate column is a fraction in this file and is ignored either way.
+    assert export.pages[0]["ctr_percent"] == 0.46
+
+    assert [row["query"] for row in export.queries] == ["office space pune",
+                                                        "day pass mumbai"]
+    assert export.queries[0]["impressions"] == 1800
+
+
+def test_the_position_column_is_not_the_rank_order_column(tmp_path):
+    """"Rank Order" and "Ranking Bucket" sit either side of "Position"."""
+    export = gsc.read_export(real_workbook(tmp_path))
+    assert [row["position"] for row in export.queries] == [6.1, 12.7]
+
+
+def test_a_date_cell_becomes_an_iso_date_so_the_period_sorts(tmp_path):
+    export = gsc.read_export(real_workbook(tmp_path))
+    assert export.has_period is True
+    assert export.date_range == "2025-05-04 to 2026-08-31"
+
+
+def test_sheet_names_and_headers_are_matched_on_shape_not_on_name(tmp_path):
+    """Rename every sheet to something meaningless and nothing changes."""
+    import datetime
+
+    from openpyxl import Workbook
+
+    book = Workbook()
+    book.remove(book.active)
+    one = book.create_sheet("  Sheet1 ")
+    one.append([" Top pages ", " Clicks", "Impressions ", "CTR", "Position"])
+    one.append([f"{HOST}/a/", 12, 2600, 0.0046, 8.4])
+    two = book.create_sheet("tab two")
+    two.append(["Rank Order", " Query ", "Clicks", "Impressions", "CTR",
+                "Position", "Ranking Bucket"])
+    two.append([1, "office space pune", 9, 1800, 0.005, 6.1, "4-10"])
+    three = book.create_sheet("last")
+    three.append(["Date", "Clicks", "Impressions"])
+    three.append([datetime.date(2026, 1, 2), 4, 120])
+    path = str(tmp_path / "unnamed.xlsx")
+    book.save(path)
+
+    export = gsc.read_export(path)
+    assert export.pages[0]["url"] == f"{HOST}/a/"
+    assert export.queries[0]["query"] == "office space pune"
+    assert export.queries[0]["position"] == 6.1
+    assert export.date_range == "2026-01-02 to 2026-01-02"
+
+
+def test_a_workbook_without_a_pages_sheet_says_what_is_missing(tmp_path):
+    export = gsc.read_export(real_workbook(tmp_path, name="noPages.xlsx",
+                                           with_pages=False))
+
+    assert export.pages == []
+    assert export.queries, "the searches sheet should still be read"
+    assert any("no table of pages" in note for note in export.notes), \
+        export.notes
+
+
+def test_a_workbook_joins_to_a_crawl_like_any_other_export(tmp_path):
+    run = crawled_run(tmp_path, pages=[page("/a/"), page("/b/")])
+    export = gsc.read_export(real_workbook(tmp_path))
+
+    block, _rows, matched = gsc.search_performance(run, export)
+    assert len(matched) == 2
+    assert block["join"]["matched"]["count"] == 2
+    assert block["totals"]["impressions"] == 3500

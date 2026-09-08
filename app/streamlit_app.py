@@ -299,10 +299,12 @@ def _search_performance(run, findings):
         st.caption("No Search Console export attached to this run yet.")
 
     upload = st.file_uploader(
-        "Attach Search Console export (zip or CSV)",
-        type=["zip", "csv"], key=f"gsc_{run['name']}",
-        help="The export is read, joined to this crawl and then deleted. "
-             "Only the audit's own join file is kept.")
+        "Attach Search Console export (zip, Excel workbook or CSV)",
+        type=["zip", "xlsx", "csv"], key=f"gsc_{run['name']}",
+        help="Whatever Search Console gave you: the export zip, the "
+             "spreadsheet, or one of its CSVs. It is read, joined to this "
+             "crawl and then deleted. Only the audit's own join file is "
+             "kept.")
     if upload is not None and st.button("Attach export", key="attach_gsc"):
         with st.spinner("Joining the export to the crawl..."):
             result = runner.attach_gsc(run["path"], upload, upload.name)

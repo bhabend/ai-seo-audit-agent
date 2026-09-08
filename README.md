@@ -343,13 +343,21 @@ findings exist only where the two meet.
 > send us the zip. If you can also export queries per page from the Pages
 > view, send that too.
 
-That zip is the input this mode is built for, from either kind of property:
-a URL-prefix property, whose addresses carry `https://`, or a domain
-property, whose addresses do not. The reader uses three of its tables, Pages,
-Queries and Dates, and ignores Countries, Devices, Search appearance and
-Filters. The optional queries-per-page file is the only source for the
-cannibalisation finding; without one the report says the export cannot
-answer that, rather than guessing.
+**Whatever container it arrives in.** Search Console's Export button offers
+a zip of CSVs, a spreadsheet, or Google Sheets, and clients send whichever
+they pressed. Four are accepted: the **zip**, an **Excel workbook**
+(`.xlsx`), a **folder** of the unzipped CSVs, or a **single CSV**. Nothing is
+matched on a file name, a sheet name or their whitespace: every sheet and
+every CSV is offered to the same header-shape detection, so the Pages,
+Queries and Dates tables are found wherever they sit, and extra columns such
+as "Rank Order" and "Ranking Bucket" are ignored. Countries, Devices, Search
+appearance and Filters are read past.
+
+The input works from either kind of property: a URL-prefix property, whose
+addresses carry `https://`, or a domain property, whose addresses do not. The
+optional queries-per-page file is the only source for the cannibalisation
+finding; without one the report says the export cannot answer that, rather
+than guessing.
 
 **What the numbers mean.** The click through rate is computed here, clicks
 divided by impressions, and the export's own rate column is ignored: Google
@@ -367,8 +375,8 @@ scheme-less addresses are tried as https and then http, and the coverage
 table counts how many arrived that way.
 
 **What it does.** Tables are found by shape rather than by name, so headers in
-another language, semicolon separated files and decimal commas all read
-correctly. Every address is normalised before matching, so an export that
+another language, semicolon separated files, decimal commas and a workbook's
+date cells all read correctly. Every address is normalised before matching, so an export that
 writes `example.com/a` (no scheme at all), `www.example.com/a/` or
 `EXAMPLE.COM/a/` still finds the page the crawl saw, including through a
 redirect. The join writes
