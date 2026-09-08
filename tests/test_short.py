@@ -600,3 +600,74 @@ def test_the_search_findings_are_rows_with_wholes_and_actions(short_run):
     assert hidden, rows
     assert hidden[0][1] == "2 of 35 pages that appeared in search"
     assert hidden[0][3].endswith(".")
+
+
+# --- session 13: what the section says about the export itself --------------
+
+def test_the_lead_says_the_search_totals_are_a_floor():
+    from seo_audit.report import search_lead
+
+    lead = search_lead(search_block())
+    assert "2026-01-01 to 2026-06-30" in lead
+    assert "floor" in lead
+    assert "too rare to report" in lead
+
+
+def test_the_lead_says_when_the_export_carries_no_period():
+    from seo_audit.report import search_lead
+
+    block = search_block()
+    block["date_range"] = "a period the export does not state"
+    block["has_period"] = False
+    lead = search_lead(block)
+
+    assert "not stated" in lead
+    assert "floor" in lead
+
+
+def test_the_lead_explains_an_export_from_another_property():
+    from seo_audit.report import search_lead
+
+    block = search_block()
+    block["property"] = {
+        "export_host": "other-client.com", "crawl_host": "example.com",
+        "mismatched": True,
+        "note": ("the export covers other-client.com while the audit crawled "
+                 "example.com, so almost none of it can be matched"),
+        "addresses_without_a_scheme": {"count": 0, "whole": 40,
+                                       "whole_is": "pages in the export"}}
+    lead = search_lead(block)
+
+    assert ("The export covers other-client.com while the audit crawled "
+            "example.com") in lead
+    assert lead.rstrip().endswith(".")
+
+
+def test_the_coverage_table_counts_addresses_written_without_https():
+    from seo_audit.report import search_coverage_rows
+
+    block = search_block()
+    block["property"] = {
+        "export_host": "example.com", "crawl_host": "example.com",
+        "mismatched": False, "note": "",
+        "addresses_without_a_scheme": {"count": 40, "whole": 40,
+                                       "whole_is": "pages in the export"}}
+    rows = search_coverage_rows(block)
+    labels = [row[0] for row in rows]
+
+    assert "Addresses in the export written without https" in labels
+    counts = dict(rows)
+    assert counts["Addresses in the export written without https"] == \
+        "40 of 40 pages in the export"
+    assert all(" of " in count for count in counts.values())
+
+
+def test_the_searches_whole_is_what_google_reported():
+    from seo_audit.report import search_issue_rows
+
+    block = search_block()
+    block["issue_counts"] = {"gsc_query_cannibalised": 24}
+    block["wholes_are"] = {"queries": "searches Google reported"}
+    rows = search_issue_rows(block)
+
+    assert rows[0][1] == "24 of 90 searches Google reported"

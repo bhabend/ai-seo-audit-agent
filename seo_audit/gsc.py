@@ -47,15 +47,21 @@ QUERY_WORDS = ("query", "queries", "search term", "keyword", "requête",
 CLICK_WORDS = ("click", "clic", "klick", "cliques", "kliks", "napsauket")
 IMPRESSION_WORDS = ("impression", "impresion", "impressionen", "impressões",
                     "impressioni", "vertoningen", "näyttökerrat")
-CTR_WORDS = ("ctr", "click-through", "clickthrough", "click through",
-             "taux de clic", "clickrate", "prozentsatz")
 POSITION_WORDS = ("position", "posición", "posicion", "posizione", "posição",
                   "positie", "sijainti", "rank")
 DATE_WORDS = ("date", "datum", "fecha", "data", "päivämäärä")
 
 TOP_ROWS = 20
 NEAR_MISS_LOW, NEAR_MISS_HIGH = 4.0, 15.0
-NO_RANGE = "not stated in export"
+NO_RANGE = "a period the export does not state"
+NO_RANGE_ADVICE = ("The export has no Dates table, so the period these "
+                   "numbers cover is unknown. Export again from the "
+                   "Performance page with the date range set to 16 months.")
+# Google leaves out searches too rare to report, so a query total is a floor.
+FLOOR_NOTE = ("Google leaves out searches it considers too rare to report, "
+              "so the search totals are a floor rather than a complete count.")
+QUERY_WHOLE_IS = "searches Google reported"
+MISMATCH_RATIO = 0.10
 GSC_PREFIX = "gsc_"
 JOIN_FILE = "gsc_join.csv"
 JOIN_COLUMNS = ["final_url", "gsc_url", "clicks", "impressions", "ctr_percent",
@@ -126,18 +132,17 @@ def parse_number(text: Any, whole: bool = False) -> float:
         return 0.0
 
 
-def parse_rate(text: Any) -> float:
-    """A click through rate as a percentage, however it was written.
+def rate(clicks: float, impressions: float) -> float:
+    """Clicks as a percentage of impressions.
 
-    "3.4%" and "3,4 %" are 3.4. A bare 0.034 is also 3.4: no real page has a
-    rate of three hundredths of one percent alongside four figure
-    impressions, so a value at or under one is read as a fraction.
+    The export carries a rate column, and it is ignored. Google writes it as
+    "3.4%" in one export and "0.034" in another, and a rule that guesses
+    between them will one day show 90% where the truth is 0.9%. Two numbers
+    the export states plainly divide into the third, so they do.
     """
-    raw = str(text or "")
-    value = parse_number(raw)
-    if "%" in raw:
-        return round(value, 2)
-    return round(value * 100, 2) if 0 < value <= 1 else round(value, 2)
+    if not impressions:
+        return 0.0
+    return round(clicks / impressions * 100, 2)
 
 
 def _read_csv_bytes(data: bytes) -> List[List[str]]:
@@ -183,10 +188,17 @@ class Export:
     notes: List[str] = field(default_factory=list)
 
     @property
+    def has_period(self) -> bool:
+        return self.date_range != NO_RANGE
+
+    @property
     def coverage_note(self) -> str:
         found = ", ".join(self.tables_found) or "nothing readable"
-        return (f"Read {found}. Covers {self.date_range}. "
+        note = (f"Read {found}. Covers {self.date_range}. "
                 f"{len(self.pages)} pages and {len(self.queries)} searches.")
+        if not self.has_period:
+            note += " " + NO_RANGE_ADVICE
+        return note
 
 
 def _row_dicts(rows: List[List[str]], columns: Dict[str, Optional[int]]
@@ -198,11 +210,12 @@ def _row_dicts(rows: List[List[str]], columns: Dict[str, Optional[int]]
         def cell(key):
             index = columns.get(key)
             return row[index] if index is not None and index < len(row) else ""
+        clicks = int(parse_number(cell("clicks"), whole=True))
+        impressions = int(parse_number(cell("impressions"), whole=True))
         entry = {
-            "clicks": int(parse_number(cell("clicks"), whole=True)),
-            "impressions": int(parse_number(cell("impressions"),
-                                            whole=True)),
-            "ctr_percent": parse_rate(cell("ctr")),
+            "clicks": clicks,
+            "impressions": impressions,
+            "ctr_percent": rate(clicks, impressions),
             "position": round(parse_number(cell("position")), 1),
         }
         if columns.get("page") is not None:
@@ -231,7 +244,6 @@ def read_export(path: str) -> Export:
             "query": _find_column(headers, QUERY_WORDS),
             "clicks": _find_column(headers, CLICK_WORDS),
             "impressions": _find_column(headers, IMPRESSION_WORDS),
-            "ctr": _find_column(headers, CTR_WORDS),
             "position": _find_column(headers, POSITION_WORDS),
             "date": _find_column(headers, DATE_WORDS),
         }
@@ -259,8 +271,7 @@ def read_export(path: str) -> Export:
     if dates:
         export.date_range = f"{min(dates)} to {max(dates)}"
     else:
-        export.notes.append("no date table in the export, so the period the "
-                            "numbers cover is not stated")
+        export.notes.append(NO_RANGE_ADVICE)
     if export.pairs and not export.queries:
         # A "searches by page" table also answers every question the plain
         # searches table would have.
@@ -286,29 +297,49 @@ def _fold_pairs(pairs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for entry in folded.values():
         weight = entry.pop("_weight") or 1
         entry["position"] = round(entry["position"] / weight, 1)
-        entry["ctr_percent"] = round(
-            entry["clicks"] / entry["impressions"] * 100, 2
-        ) if entry["impressions"] else 0.0
+        entry["ctr_percent"] = rate(entry["clicks"], entry["impressions"])
         out.append(entry)
     return out
 
 
 # --- matching an address to a crawled page ----------------------------------
 
+def has_scheme(url: str) -> bool:
+    return "://" in str(url or "")
+
+
+def _candidates(url: str) -> List[str]:
+    """The addresses to try for one line of the export.
+
+    A domain property exports `example.com/page` with no scheme at all, and
+    normalising that returns nothing, so a whole export matched nothing. Both
+    schemes are tried, https first, because the export does not say which one
+    the site answers on and the crawl does.
+    """
+    raw = str(url or "").strip()
+    if not raw:
+        return []
+    if has_scheme(raw):
+        return [raw]
+    return [f"https://{raw}", f"http://{raw}"]
+
+
 def _keys(url: str) -> List[str]:
     """Every form of one address that should still find its page.
 
     A client's export writes the address the way Search Console holds it,
-    which may differ from the crawl by a trailing slash, by www, or by case
-    in the host. None of those are different pages.
+    which may differ from the crawl by a scheme, a trailing slash, by www, or
+    by case in the host. None of those are different pages.
     """
-    normalised = normalize(url)
-    if not normalised:
-        return []
-    forms = {normalised}
-    variant = slash_variant(normalised)
-    if variant:
-        forms.add(variant)
+    forms = set()
+    for candidate in _candidates(url):
+        normalised = normalize(candidate)
+        if not normalised:
+            continue
+        forms.add(normalised)
+        variant = slash_variant(normalised)
+        if variant:
+            forms.add(variant)
     for form in list(forms):
         scheme, _, rest = form.partition("://")
         host, slash, tail = rest.partition("/")
@@ -316,6 +347,25 @@ def _keys(url: str) -> List[str]:
         if bare != host:
             forms.add(f"{scheme}://{bare}{slash}{tail}")
     return sorted(forms)
+
+
+def _host_of(url: str) -> str:
+    """The host an address sits on, with www dropped, or an empty string."""
+    for candidate in _candidates(url):
+        normalised = normalize(candidate)
+        if normalised:
+            return strip_www(normalised.partition("://")[2].partition("/")[0])
+    return ""
+
+
+def dominant_host(urls: Iterable[str]) -> str:
+    """The host most of these addresses are on."""
+    counts: Dict[str, int] = {}
+    for url in urls:
+        host = _host_of(url)
+        if host:
+            counts[host] = counts.get(host, 0) + 1
+    return max(counts, key=counts.get) if counts else ""
 
 
 def _page_index(pages: List[Dict[str, str]]) -> Dict[str, Dict[str, str]]:
@@ -395,6 +445,8 @@ def join(run_dir: str, export: Export) -> Dict[str, Any]:
     sitemap_pages = [page for page in pages if _flag(page.get("in_sitemap"))]
     with_impressions = [row for row in seen_final.values()
                         if row["impressions"] > 0]
+    scheme_less = sum(1 for row in export.pages
+                      if row.get("url") and not has_scheme(row["url"]))
 
     return {
         "matched": matched,
@@ -404,6 +456,11 @@ def join(run_dir: str, export: Export) -> Dict[str, Any]:
         "sitemap_pages": sitemap_pages,
         "with_impressions": with_impressions,
         "crawled_pages": pages,
+        "scheme_less": scheme_less,
+        "export_host": dominant_host(row.get("url", "")
+                                     for row in export.pages),
+        "crawl_host": dominant_host(page.get("final_url", "")
+                                    for page in pages),
     }
 
 
@@ -488,6 +545,32 @@ def _top(rows: Iterable[Dict[str, Any]], key: str) -> List[Dict[str, Any]]:
     return sorted(rows, key=lambda row: -row.get("impressions", 0))[:TOP_ROWS]
 
 
+def host_mismatch(joined: Dict[str, Any], gsc_pages: int) -> Dict[str, Any]:
+    """Whether this export looks like it belongs to another property.
+
+    Almost nothing matching is not the same as a site with no search
+    presence, and the difference matters to whoever reads the report. When
+    the two sides sit on different hosts the report says which, rather than
+    printing a bare zero and leaving it to be misread.
+    """
+    matched = len(joined["by_final_url"])
+    export_host = joined.get("export_host", "")
+    crawl_host = joined.get("crawl_host", "")
+    if not gsc_pages or matched >= gsc_pages * MISMATCH_RATIO:
+        return {"mismatched": False, "export_host": export_host,
+                "crawl_host": crawl_host, "note": ""}
+
+    if export_host and crawl_host and export_host != crawl_host:
+        note = (f"the export covers {export_host} while the audit crawled "
+                f"{crawl_host}, so almost none of it can be matched")
+    else:
+        note = ("the export appears to cover a different property from the "
+                "one this audit crawled, so almost none of it can be "
+                "matched")
+    return {"mismatched": True, "export_host": export_host,
+            "crawl_host": crawl_host, "note": note}
+
+
 def search_performance(run_dir: str, export: Export) -> Tuple[
         Dict[str, Any], List[Dict[str, str]], List[Dict[str, Any]]]:
     """The block that goes into findings.json, and the rows for the issues."""
@@ -499,11 +582,28 @@ def search_performance(run_dir: str, export: Export) -> Tuple[
     near_miss = [row for row in export.queries
                  if NEAR_MISS_LOW <= row.get("position", 0) <= NEAR_MISS_HIGH]
 
+    mismatch = host_mismatch(joined, gsc_pages)
+    coverage_note = export.coverage_note
+    if mismatch["mismatched"]:
+        coverage_note += (" " + mismatch["note"][0].upper()
+                          + mismatch["note"][1:] + ".")
+
     block = {
         "provided": True,
         "date_range": export.date_range,
-        "coverage_note": export.coverage_note,
+        "has_period": export.has_period,
+        "coverage_note": coverage_note,
         "notes": export.notes,
+        "ctr_source": "computed",
+        "floor_note": FLOOR_NOTE,
+        "property": {
+            "export_host": mismatch["export_host"],
+            "crawl_host": mismatch["crawl_host"],
+            "mismatched": mismatch["mismatched"],
+            "note": mismatch["note"],
+            "addresses_without_a_scheme": _share(
+                joined["scheme_less"], gsc_pages, "pages in the export"),
+        },
         "totals": {
             "impressions": sum(row["impressions"] for row in export.pages),
             "clicks": sum(row["clicks"] for row in export.pages),
@@ -534,6 +634,9 @@ def search_performance(run_dir: str, export: Export) -> Tuple[
             "sitemap_pages": len(joined["sitemap_pages"]),
             "queries": len(export.queries),
         },
+        # What each whole is called where it is printed. The searches whole
+        # is not "every search": it is every search Google chose to report.
+        "wholes_are": {"queries": QUERY_WHOLE_IS},
     }
     return block, rows, joined["matched"]
 
@@ -634,6 +737,13 @@ def main(argv=None) -> int:
           file=sys.stderr)
     for issue_type, count in sorted(block["issue_counts"].items()):
         print(f"  {issue_type}: {count}", file=sys.stderr)
+    scheme_less = block["property"]["addresses_without_a_scheme"]
+    if scheme_less["count"]:
+        print(f"note     : {scheme_less['count']} of {scheme_less['whole']} "
+              f"addresses arrived without a scheme, read as https",
+              file=sys.stderr)
+    if block["property"]["mismatched"]:
+        print(f"warning  : {block['property']['note']}", file=sys.stderr)
     for note in export.notes:
         print(f"note     : {note}", file=sys.stderr)
     return 0

@@ -106,7 +106,8 @@ def test_a_folder_of_csvs_is_read(tmp_path):
 
     assert len(export.pages) == 1 and export.pages[0]["clicks"] == 3
     assert export.date_range == gsc.NO_RANGE
-    assert any("no date table" in note for note in export.notes)
+    # The note now tells the client what to do about it.
+    assert any("16 months" in note for note in export.notes)
 
 
 def test_a_single_csv_is_read(tmp_path):
@@ -144,16 +145,9 @@ def test_numbers_written_the_european_way_are_read_the_same(tmp_path):
 
     assert export.pages[0]["clicks"] == 1234
     assert export.pages[0]["impressions"] == 45678
-    assert export.pages[0]["ctr_percent"] == 3.45
     assert export.pages[0]["position"] == 12.3
-
-
-def test_a_rate_is_a_percentage_however_it_arrived():
-    assert gsc.parse_rate("3.4%") == 3.4
-    assert gsc.parse_rate("3,4 %") == 3.4
-    assert gsc.parse_rate("0.034") == 3.4
-    assert gsc.parse_rate("12") == 12
-    assert gsc.parse_rate("") == 0.0
+    # The rate column said "3,45 %" and was ignored: 1234 of 45678 is 2.7%.
+    assert export.pages[0]["ctr_percent"] == 2.7
 
 
 def test_a_table_nobody_can_read_is_said_out_loud(tmp_path):
@@ -418,3 +412,129 @@ def test_a_search_finding_never_moves_a_page_score():
     for issue_type in GSC_TYPES:
         assert weights.page_issues[issue_type]["points"] == 0, issue_type
     assert score_page(list(GSC_TYPES), weights).score == 100
+
+
+# --- session 13: what a real export from either property type does ----------
+
+def test_a_domain_property_export_has_no_scheme_and_still_matches(tmp_path):
+    """Search Console holds a domain property as example.com/page."""
+    run = crawled_run(tmp_path, pages=[page("/a/"), page("/b/")])
+    path = export_zip(tmp_path, {"Pages.csv": PAGES_TABLE + [
+        ["example.com/a/", 5, 200, "2.5%", 4.0],
+        ["www.example.com/b", 3, 150, "2%", 6.0]]})
+
+    joined = gsc.join(run, gsc.read_export(path))
+    assert set(joined["by_final_url"]) == {f"{HOST}/a/", f"{HOST}/b/"}
+    assert joined["unseen"] == []
+    assert joined["scheme_less"] == 2
+
+
+def test_the_count_of_scheme_less_addresses_is_recorded(tmp_path):
+    run = crawled_run(tmp_path, pages=[page("/a/"), page("/b/")])
+    path = export_zip(tmp_path, {"Pages.csv": PAGES_TABLE + [
+        ["example.com/a/", 5, 200, "2.5%", 4.0],
+        [f"{HOST}/b/", 3, 150, "2%", 6.0]]})
+
+    block, _rows, _m = gsc.search_performance(run, gsc.read_export(path))
+    share = block["property"]["addresses_without_a_scheme"]
+    assert share == {"count": 1, "whole": 2,
+                     "whole_is": "pages in the export"}
+    assert block["property"]["mismatched"] is False
+
+
+def test_a_site_that_answers_on_http_is_still_matched(tmp_path):
+    """The export does not say which scheme the site uses; the crawl does."""
+    plain = {"url": "http://example.com/a/", "final_url": "http://example.com/a/",
+             "status_code": "200", "in_sitemap": "True", "inlinks": "2",
+             "canonical": "http://example.com/a/", "canonical_is_self": "True",
+             "word_count": "400", "schema_block_count": "1",
+             "has_microdata": "False", "score": "90"}
+    run = crawled_run(tmp_path, pages=[plain])
+    path = export_zip(tmp_path, {"Pages.csv": PAGES_TABLE + [
+        ["example.com/a/", 1, 20, "5%", 3.0]]})
+
+    joined = gsc.join(run, gsc.read_export(path))
+    assert list(joined["by_final_url"]) == ["http://example.com/a/"]
+
+
+def test_an_export_for_another_property_says_so(tmp_path):
+    """Nothing matching is not the same as nobody searching."""
+    run = crawled_run(tmp_path, pages=[page("/a/"), page("/b/")])
+    path = export_zip(tmp_path, {"Pages.csv": PAGES_TABLE + [
+        ["https://other-client.com/a/", 5, 200, "2%", 4.0],
+        ["https://other-client.com/b/", 3, 150, "2%", 6.0]]})
+
+    block, _rows, _m = gsc.search_performance(run, gsc.read_export(path))
+    property_note = block["property"]
+
+    assert property_note["mismatched"] is True
+    assert property_note["export_host"] == "other-client.com"
+    assert property_note["crawl_host"] == "example.com"
+    assert property_note["note"] == ("the export covers other-client.com "
+                                     "while the audit crawled example.com, "
+                                     "so almost none of it can be matched")
+    assert property_note["note"] in block["coverage_note"].lower()
+
+
+def test_a_matching_export_carries_no_mismatch_note(tmp_path):
+    run = crawled_run(tmp_path, pages=[page("/a/")])
+    path = export_zip(tmp_path, {"Pages.csv": PAGES_TABLE + [
+        [f"{HOST}/a/", 5, 200, "2%", 4.0]]})
+
+    block, _rows, _m = gsc.search_performance(run, gsc.read_export(path))
+    assert block["property"]["mismatched"] is False
+    assert block["property"]["note"] == ""
+
+
+def test_the_rate_is_computed_from_clicks_and_impressions(tmp_path):
+    """Whatever the export's own rate column says, it is not read."""
+    run = crawled_run(tmp_path, pages=[page("/a/")])
+    path = export_zip(tmp_path, {"Pages.csv": PAGES_TABLE + [
+        [f"{HOST}/a/", 5, 200, "90%", 4.0]],
+        "Queries.csv": QUERIES_TABLE + [["office space", 1, 8, "0.9", 5.0]]})
+    export = gsc.read_export(path)
+
+    assert export.pages[0]["ctr_percent"] == 2.5
+    assert export.queries[0]["ctr_percent"] == 12.5
+    assert gsc.rate(0, 0) == 0.0
+    assert not hasattr(gsc, "parse_rate")
+
+    block, _rows, _m = gsc.search_performance(run, export)
+    assert block["ctr_source"] == "computed"
+
+
+def test_the_search_totals_are_marked_as_a_floor(tmp_path):
+    run = crawled_run(tmp_path, pages=[page("/a/")])
+    path = export_zip(tmp_path, {"Pages.csv": PAGES_TABLE + [
+        [f"{HOST}/a/", 5, 200, "2%", 4.0]],
+        "Queries.csv": QUERIES_TABLE + [["office space", 5, 200, "2%", 4.0]]})
+
+    block, _rows, _m = gsc.search_performance(run, gsc.read_export(path))
+    assert "floor" in block["floor_note"]
+    assert block["wholes_are"]["queries"] == "searches Google reported"
+
+
+def test_an_export_without_dates_asks_for_one_with_them(tmp_path):
+    run = crawled_run(tmp_path, pages=[page("/a/")])
+    path = export_zip(tmp_path, {"Pages.csv": PAGES_TABLE + [
+        [f"{HOST}/a/", 5, 200, "2%", 4.0]]})
+
+    export = gsc.read_export(path)
+    assert export.has_period is False
+    assert "16 months" in export.coverage_note
+    block, _rows, _m = gsc.search_performance(run, export)
+    assert block["has_period"] is False
+    assert "16 months" in block["coverage_note"]
+
+
+def test_an_export_with_dates_states_its_period(tmp_path):
+    run = crawled_run(tmp_path, pages=[page("/a/")])
+    path = export_zip(tmp_path, {
+        "Pages.csv": PAGES_TABLE + [[f"{HOST}/a/", 5, 200, "2%", 4.0]],
+        "Dates.csv": [["Date", "Clicks", "Impressions"],
+                      ["2025-05-01", 1, 10], ["2026-08-31", 2, 20]]})
+
+    block, _rows, _m = gsc.search_performance(run, gsc.read_export(path))
+    assert block["has_period"] is True
+    assert block["date_range"] == "2025-05-01 to 2026-08-31"
+    assert "16 months" not in block["coverage_note"]

@@ -998,16 +998,32 @@ CANNIBAL_COLUMNS = ["Search", "Pages", "Impressions"]
 SEARCH_TABLE_ROWS = 10
 
 
+FLOOR_CLAUSE = ("Google leaves out searches too rare to report, so the "
+                "search figures are a floor rather than a complete count.")
+NO_PERIOD_CLAUSE = ("The export carries no dates, so the period these "
+                    "numbers cover is not stated.")
+
+
 def search_lead(block: Dict) -> str:
-    """One sentence: how much search data there is and what period it covers."""
+    """What there is, what period it covers, and what it does not include."""
     totals = block.get("totals") or {}
     period = block.get("date_range") or "a period the export does not state"
-    return (f"Search Console recorded "
+    lead = (f"Search Console recorded "
             f"{totals.get('impressions', 0)} impressions and "
             f"{totals.get('clicks', 0)} clicks across "
             f"{totals.get('pages_in_export', 0)} pages and "
             f"{totals.get('queries_in_export', 0)} searches, covering "
             f"{period}.")
+    if block.get("has_period") is False:
+        lead += " " + NO_PERIOD_CLAUSE
+    lead += " " + FLOOR_CLAUSE
+
+    note = ((block.get("property") or {}).get("note") or "").strip()
+    if note:
+        # An export from the wrong property reads as a site nobody searches
+        # for, unless the report says what actually happened.
+        lead += " " + note[0].upper() + note[1:] + "."
+    return lead
 
 
 def search_coverage_rows(block: Dict) -> List[List[str]]:
@@ -1024,6 +1040,16 @@ def search_coverage_rows(block: Dict) -> List[List[str]]:
         rows.append([label, f"{share.get('count', 0)} of "
                             f"{share.get('whole', 0)} "
                             f"{share.get('whole_is', '')}".strip()])
+
+    scheme_less = ((block.get("property") or {})
+                   .get("addresses_without_a_scheme") or {})
+    if scheme_less.get("count"):
+        # A domain property exports addresses with no scheme at all. Saying
+        # so explains why the crawl and the export ever looked different.
+        rows.append(["Addresses in the export written without https",
+                     f"{scheme_less.get('count', 0)} of "
+                     f"{scheme_less.get('whole', 0)} "
+                     f"{scheme_less.get('whole_is', '')}".strip()])
     return rows
 
 
@@ -1048,6 +1074,9 @@ def search_issue_rows(block: Dict) -> List[List[str]]:
 
     counts = block.get("issue_counts") or {}
     wholes = block.get("wholes") or {}
+    # The export says what its own wholes are called, because only it knows
+    # that "searches" means the searches Google chose to report.
+    named = block.get("wholes_are") or {}
     from .findings import GSC_WHOLES
 
     rows = []
@@ -1055,6 +1084,7 @@ def search_issue_rows(block: Dict) -> List[List[str]]:
         if not count:
             continue
         key, whole_is = GSC_WHOLES.get(issue_type, ("", "findings"))
+        whole_is = named.get(key, whole_is)
         whole = wholes.get(key) or count
         rows.append((SEVERITY_RANK.get(
             PAGE_ISSUE_SEVERITY.get(issue_type, "low"), 2), -count,

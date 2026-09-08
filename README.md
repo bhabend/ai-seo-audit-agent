@@ -336,20 +336,42 @@ A separate step over a finished run, not a second crawl. The crawl says what
 the site is; the export says what search engines did with it, and several
 findings exist only where the two meet.
 
-**What to ask the client for.** In Search Console, open Performance, set the
-date range to the last 16 months, and use Export at the top right. The zip
-holds a CSV per tab: Pages, Queries, Countries, Devices, Dates and Search
-appearance. Pages and Queries are the two that matter, and Dates is what
-lets the report state the period the numbers cover. A "Queries by page"
-export, or any table pairing a search with a page, also answers whether two
-pages compete for the same search; without one the report says so instead of
-guessing.
+**What to ask the client for**, word for word:
+
+> In Search Console, open Performance, set the search type to Web and the
+> date range to the last 16 months, then press Export at the top right and
+> send us the zip. If you can also export queries per page from the Pages
+> view, send that too.
+
+That zip is the input this mode is built for, from either kind of property:
+a URL-prefix property, whose addresses carry `https://`, or a domain
+property, whose addresses do not. The reader uses three of its tables, Pages,
+Queries and Dates, and ignores Countries, Devices, Search appearance and
+Filters. The optional queries-per-page file is the only source for the
+cannibalisation finding; without one the report says the export cannot
+answer that, rather than guessing.
+
+**What the numbers mean.** The click through rate is computed here, clicks
+divided by impressions, and the export's own rate column is ignored: Google
+writes it as "3.4%" in one export and "0.034" in another, and a reader that
+guesses between them eventually shows 90% where the truth is 0.9%. Search
+totals are a **floor**, not a total, because Google leaves out searches it
+considers too rare to report, and the section says so. If the zip has no
+Dates table the section states that the period is unknown and asks for the
+export to be repeated with the range set to 16 months.
+
+**When almost nothing matches**, the report says why rather than printing a
+bare zero: an export whose addresses sit on another host reads as "the export
+covers HOST_A while the audit crawled HOST_B". A domain property's
+scheme-less addresses are tried as https and then http, and the coverage
+table counts how many arrived that way.
 
 **What it does.** Tables are found by shape rather than by name, so headers in
 another language, semicolon separated files and decimal commas all read
 correctly. Every address is normalised before matching, so an export that
-writes `example.com/a`, `www.example.com/a/` or `EXAMPLE.COM/a/` still finds
-the page the crawl saw, including through a redirect. The join writes
+writes `example.com/a` (no scheme at all), `www.example.com/a/` or
+`EXAMPLE.COM/a/` still finds the page the crawl saw, including through a
+redirect. The join writes
 `gsc_join.csv` into the run folder, adds a `search_performance` block to
 `findings.json`, sets the run's mode to `full` and appends five kinds of
 finding to `page_issues.csv`: impressions on a page hidden from search,
