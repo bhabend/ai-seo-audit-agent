@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from dotenv import load_dotenv
@@ -117,6 +118,11 @@ def main(argv=None) -> int:
           file=sys.stderr)
 
     outcome = run_crawl(config, out_dir=args.out)
+    # The console reads this to pin the folder a run wrote to. It cannot come
+    # earlier: the folder is named inside run_crawl, once the homepage has
+    # said which host the site actually answers on.
+    print(f"RUN_DIR={os.path.dirname(outcome.paths['crawl_summary_json'])}",
+          file=sys.stderr, flush=True)
     print(json.dumps(build_summary(outcome), indent=2, ensure_ascii=False))
 
     for label, key in (("raw crawl    ", "raw_crawl_csv"),

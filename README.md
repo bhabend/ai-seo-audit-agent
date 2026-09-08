@@ -325,6 +325,45 @@ site.
 
 `--compare-to PATH` picks a specific folder; `--no-compare` switches it off.
 
+## The console
+
+```bash
+streamlit run app/streamlit_app.py
+```
+
+A thin operator layer over the three commands. It holds no audit logic: it
+starts `seo_audit.cli` as a separate process, reads the files that process
+writes, runs `seo_audit.report` when asked, and asks `seo_audit.clean` to
+delete folders. Everything it shows comes from `findings.json`,
+`crawl_summary.json` or a row count. It makes no network requests of its own.
+
+**Run audit.** Domain, optional sitemap, page and worker limits, PageSpeed on
+or off, comparison on or off, and an advanced expander for the sweep and
+external check limits. Starting a run launches the command and shows the
+stage, the counters and the tail of the log, refreshing while it runs.
+
+**Results.** Pick a host and a run: the score and its components, the priority
+fixes, one expander per section, the comparison when there is one, and a
+download button for each of the eight run files.
+
+**Report.** Pick a run, choose short (the default, no model calls) or long,
+generate, and download the .docx. The long format's calls and tokens are read
+back from `report_usage.json`.
+
+**Runs.** Every run folder with its date, size and whether it finished.
+Deleting is behind a confirmation checkbox and goes through the clean
+command, which never removes a host's newest run.
+
+**Runs survive the browser.** The audit is its own process, so closing the tab
+or restarting Streamlit does not stop it. Progress is read from the run
+folder, never from memory: a run is finished when `findings.json` exists.
+Each run logs to `output/logs/<timestamp>.log`, which carries the command, the
+`RUN_DIR=` line the audit prints when the folder is named, and `EXIT_CODE=` at
+the end. The exit code is written by a one line wrapper around the audit, not
+by the console, so a run that fails while nobody is watching still records how
+it ended. On startup the console re-attaches to the newest log whose run has
+neither findings nor an exit code.
+
 ## The report
 
 ```bash

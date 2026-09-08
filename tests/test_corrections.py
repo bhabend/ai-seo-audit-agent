@@ -376,12 +376,24 @@ def test_the_sweep_keeps_the_crawl_timeout(tmp_path):
 
 # --- session 7 item 2: external checks run wide ------------------------------
 
+EXTERNAL_TARGETS = 3
+
+
 def test_external_checks_run_in_parallel_but_report_in_priority_order(tmp_path):
-    """Eight at a time, yet the most-linked target is still reported first."""
+    """Eight at a time, yet the most-linked target is still reported first.
+
+    The concurrency is proved with a barrier rather than a stopwatch. Every
+    external check waits until all three are in flight, so a pool that ran
+    them one at a time cannot get past the barrier and the test fails with a
+    named reason instead of flaking. The old version asserted that two checks
+    happened to overlap, which was true only when the machine was idle.
+    """
     import threading as _t
     seen_concurrent = []
     live = {"n": 0}
     lock = _t.Lock()
+    all_in_flight = _t.Barrier(EXTERNAL_TARGETS)
+    serial = {"hit": False}
 
     from seo_audit.fetch import Fetcher as RealFetcher
     original = RealFetcher.head
@@ -392,6 +404,10 @@ def test_external_checks_run_in_parallel_but_report_in_priority_order(tmp_path):
                 live["n"] += 1
                 seen_concurrent.append(live["n"])
             try:
+                try:
+                    all_in_flight.wait(timeout=10)
+                except _t.BrokenBarrierError:
+                    serial["hit"] = True
                 return original(self, url, timeout=timeout,
                                 max_retries=max_retries)
             finally:
@@ -418,7 +434,10 @@ def test_external_checks_run_in_parallel_but_report_in_priority_order(tmp_path):
     finally:
         RealFetcher.head = original
 
-    assert max(seen_concurrent) > 1, "external checks ran one at a time"
+    assert not serial["hit"], "external checks ran one at a time"
+    assert len(seen_concurrent) == EXTERNAL_TARGETS, seen_concurrent
+    assert max(seen_concurrent) == EXTERNAL_TARGETS, (
+        f"only {max(seen_concurrent)} checks were ever in flight at once")
     # Priority preserved: the 3-referrer target is the reported breakage.
     broken = run.page_issues_of("external_link_broken")
     assert [b["url"] for b in broken] == ["https://dead.com/gone"]
