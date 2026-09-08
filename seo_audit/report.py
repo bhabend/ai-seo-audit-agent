@@ -602,6 +602,32 @@ def _in_place_row(in_place: List[str]) -> List[str]:
     return [IN_PLACE, "", "", text[0].upper() + text[1:] + "."]
 
 
+def short_section_parts(key: str, section: Any, coverage: Dict
+                        ) -> Tuple[List[List[str]], List[str]]:
+    """(finding rows, the In place row) for one section of the short report.
+
+    The one place a section's table is decided. The document renders it and
+    the console shows the same rows, so an operator and a client are never
+    looking at two different tables built by two different pieces of code.
+    """
+    parsed = coverage.get("pages_parsed", 0)
+    crawled = coverage.get("pages_found", 0)
+    if key == "crawlability":
+        rows, in_place = _crawlability_table(section, coverage)
+    elif key == "performance":
+        rows, in_place = _performance_table(section)
+    else:
+        rows, in_place = _section_table(key, section, parsed, crawled)
+    return rows, _in_place_row(in_place)
+
+
+def short_section_rows(key: str, section: Any, coverage: Dict
+                       ) -> List[List[str]]:
+    """The whole table, findings first and what is in place last."""
+    rows, in_place_row = short_section_parts(key, section, coverage)
+    return rows + [in_place_row]
+
+
 # Crawlability counts obstacles rather than page faults, so its rows are
 # written here: what was in the way, how many of what, and what to do.
 def _crawlability_table(section: Dict, coverage: Dict
@@ -889,18 +915,12 @@ def build_short_document(findings: Dict, charts: Dict, host: str) -> Any:
         section = findings.get(key)
         if section is None:
             continue
-        if key == "crawlability":
-            rows, in_place = _crawlability_table(section, coverage)
-        elif key == "performance":
-            rows, in_place = _performance_table(section)
-        else:
-            rows, in_place = _section_table(key, section, parsed, crawled)
+        rows, in_place_row = short_section_parts(key, section, coverage)
 
         document.add_heading(heading, level=1)
         document.add_paragraph(strip_dashes(
             _short_lead(key, section, rows, coverage)))
-        _add_table(document, SHORT_SECTION_COLUMNS,
-                   rows + [_in_place_row(in_place)])
+        _add_table(document, SHORT_SECTION_COLUMNS, rows + [in_place_row])
 
         if key == "performance":
             measured = (section or {}).get("templates_measured") or []

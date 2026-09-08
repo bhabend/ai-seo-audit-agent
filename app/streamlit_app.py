@@ -23,9 +23,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import runner  # noqa: E402  (the app runs as a script, not a package)
 
 import seo_audit  # noqa: E402
+from seo_audit import report  # noqa: E402  (the section tables, as rendered)
 
-REFRESH_SECONDS = 5
+REFRESH_SECONDS = 4
 PAGES = ("Run audit", "Results", "Report", "Runs")
+
+# Said before the click, not after the bill.
+COST_NOTE = ("Long format writes narrative with OpenAI: about ten calls and "
+             "about one cent per report. Short format makes no calls.")
 
 
 def _state(key, default):
@@ -56,6 +61,12 @@ def page_run_audit():
     st.header("Run audit")
     st.caption("The audit runs as its own process. You can close this tab.")
 
+    running = runner.running_runs()
+    busy = bool(running)
+    if busy:
+        st.warning(f"A run is going: {running[0]}. One at a time, so the "
+                   f"counters below always belong to it.")
+
     with st.form("audit"):
         domain = st.text_input("Domain", placeholder="https://example.com")
         sitemap = st.text_input("Sitemap URL (optional)", value="")
@@ -78,10 +89,12 @@ def page_run_audit():
             external_check_limit = st.number_input(
                 "External link check limit", min_value=0, max_value=100000,
                 value=1000, step=100)
-        started = st.form_submit_button("Start audit")
+        started = st.form_submit_button("Start audit", disabled=busy)
 
     if started:
-        if not domain.strip():
+        if busy:
+            st.warning("A run is already going. Wait for it to finish.")
+        elif not domain.strip():
             st.error("A domain is required.")
         else:
             launch = runner.start_audit(domain.strip(), {
@@ -93,34 +106,55 @@ def page_run_audit():
                 "sweep_limit": int(sweep_limit),
                 "external_check_limit": int(external_check_limit),
             })
-            st.session_state["log"] = launch["log"]
-            st.session_state["started"] = launch["started"]
-            st.session_state["run_dir"] = None
-            st.success(f"Started as process {launch['pid']}. "
-                       f"Log: {launch['log']}")
+            if not launch.get("ok"):
+                st.error(launch.get("error", "The run was refused."))
+            else:
+                # The view is bound to the log this click created, so a run
+                # someone else starts later cannot walk into this page.
+                st.session_state["log"] = launch["log"]
+                st.success(f"Started as process {launch['pid']}. "
+                           f"Log: {launch['log']}")
 
     log_path = st.session_state.get("log")
     if not log_path:
-        # A run may have been started before this console was restarted.
+        # This console may have been restarted under a run. There is only
+        # ever one, so there is nothing to choose between.
         attached = runner.attach()
         if attached:
             st.session_state["log"] = log_path = attached["log"]
-            st.session_state["run_dir"] = attached["run_dir"]
             st.info(f"Attached to the run already in flight: {log_path}")
 
     if not log_path:
         st.write("No run in flight.")
         return
 
-    run_dir = (st.session_state.get("run_dir")
-               or runner.run_dir_of(log_path)
-               or runner.newest_run_dir(
-                   since=st.session_state.get("started", 0.0)))
-    if run_dir:
-        st.session_state["run_dir"] = run_dir
+    if runner.exit_code_of(log_path) is None:
+        _progress(log_path)
+    else:
+        # Finished: the same block, drawn once, with no timer behind it.
+        _render_progress(log_path)
 
+
+@st.fragment(run_every=REFRESH_SECONDS)
+def _progress(log_path: str) -> None:
+    """The progress block, redrawn on a timer while the run is going.
+
+    A fragment rather than a whole page rerun: the form above keeps what was
+    typed into it. When the run ends the fragment stops asking for more, and
+    the next full rerun draws the finished block without a timer.
+    """
+    finished = _render_progress(log_path)
+    if finished:
+        st.rerun()
+
+
+def _render_progress(log_path: str) -> bool:
+    """Draw the bound run's stage, counters and log tail. True when over."""
+    run_dir = runner.bound_run_dir(log_path)
     status = runner.poll(run_dir, log_path)
+
     st.subheader(f"Stage: {status['stage']}")
+    st.caption(f"Watching {log_path}")
     if status["run_dir"]:
         st.caption(f"Writing to {status['run_dir']}")
     columns = st.columns(3)
@@ -136,16 +170,8 @@ def page_run_audit():
     st.text_area("Log", status["tail"], height=220)
     if status["running"]:
         st.caption(f"Refreshing every {REFRESH_SECONDS} seconds.")
-        _autorefresh()
-
-
-def _autorefresh():
-    """Ask Streamlit to come back in a few seconds, if it knows how."""
-    fragment = getattr(st, "autorefresh", None)
-    if callable(fragment):  # pragma: no cover - Streamlit version dependent
-        fragment(interval=REFRESH_SECONDS * 1000, key="poll")
-    else:
         st.button("Refresh now", key="refresh")
+    return not status["running"]
 
 
 # --- page 2: results ---------------------------------------------------------
@@ -199,13 +225,15 @@ def page_results():
         } for fix in fixes], use_container_width=True)
 
     st.subheader("Sections")
-    for key in ("crawlability", "indexability_technical", "on_page",
-                "content", "schema", "links", "performance"):
+    coverage = (findings.get("meta") or {}).get("coverage") or {}
+    for key, heading in report.SECTIONS:
         section = findings.get(key)
         if not section:
             continue
-        with st.expander(key.replace("_", " ").title()):
-            st.dataframe(_section_rows(section), use_container_width=True)
+        rows = report.short_section_rows(key, section, coverage)
+        with st.expander(f"{heading} ({len(rows) - 1} findings)"):
+            st.dataframe([dict(zip(report.SHORT_SECTION_COLUMNS, row))
+                          for row in rows], use_container_width=True)
 
     comparison = findings.get("comparison") or {}
     if comparison.get("previous_run"):
@@ -233,23 +261,6 @@ def page_results():
                                key=f"dl_{name}")
 
 
-def _section_rows(section, prefix=""):
-    """A findings section flattened to name and value, shares said in words."""
-    rows = []
-    if isinstance(section, dict):
-        for key, value in section.items():
-            name = f"{prefix}{key.replace('_', ' ')}"
-            if isinstance(value, dict) and "count" in value:
-                rows.append({"Measure": name, "Value": _share(value)})
-            elif isinstance(value, (int, float, str, bool)) or value is None:
-                rows.append({"Measure": name, "Value": value})
-            elif isinstance(value, list):
-                rows.append({"Measure": name, "Value": f"{len(value)} listed"})
-            elif isinstance(value, dict):
-                rows.extend(_section_rows(value, prefix=f"{name}: "))
-    return rows
-
-
 # --- page 3: report ----------------------------------------------------------
 
 def page_report():
@@ -266,6 +277,7 @@ def page_report():
                    help="Short is the client deliverable and makes no model "
                         "call. Long is the narrated version, for internal "
                         "use, and calls the model.")
+    st.caption(COST_NOTE)
     if st.button(f"Generate {fmt} report"):
         with st.spinner("Building the document..."):
             result = runner.generate_report(run["path"], fmt)
@@ -315,8 +327,9 @@ def page_runs():
     } for host, items in runs.items() for item in items], use_container_width=True)
 
     st.subheader("Delete")
-    st.caption("The newest run of a host is kept unless you delete all of "
-               "them. Deleting cannot be undone.")
+    st.caption("The newest run of a host is kept by both delete buttons. "
+               "Removing the host is the one action that keeps nothing. "
+               "Deleting cannot be undone.")
     for host, items in runs.items():
         st.markdown(f"**{host}** ({len(items)} runs)")
         columns = st.columns(2)
@@ -336,6 +349,18 @@ def page_runs():
                 st.warning("Tick the box first.")
             else:
                 _report_delete(runner.delete_runs(host, all=True))
+
+        # Removing the host keeps nothing at all, so a tick is not enough:
+        # the name has to be typed, which is hard to do by accident.
+        typed = st.text_input(f"Type {host} to remove the host entirely",
+                              key=f"t_host_{host}", value="")
+        matches = typed.strip() == host
+        if st.button(f"Remove {host} entirely", key=f"b_host_{host}",
+                     disabled=not matches):
+            if not matches:
+                st.warning(f"Type {host} exactly to remove it.")
+            else:
+                _report_delete(runner.delete_host(host))
 
 
 def _report_delete(result):
@@ -367,4 +392,8 @@ def main():
         page_runs()
 
 
-main()
+# Streamlit executes this file as "__main__" on every rerun. The guard keeps
+# an ordinary import side effect free, so a test can read this module without
+# painting a page half way through somebody else's script run.
+if __name__ == "__main__":
+    main()

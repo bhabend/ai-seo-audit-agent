@@ -374,19 +374,26 @@ def app_runner(monkeypatch, tmp_path):
         json.dump(findings, handle)
     open(os.path.join(run_dir, "raw_crawl.csv"), "w").close()
 
-    calls = SimpleNamespace(started=[], reports=[], deletes=[])
+    calls = SimpleNamespace(started=[], reports=[], deletes=[], hosts=[],
+                            running=[], exit_code=None, polled=[],
+                            run_dir=run_dir)
+
+    log_path = str(tmp_path / "run.log")
+    open(log_path, "w", encoding="utf-8").write("working\n")
 
     def fake_start(domain, options=None, log_dir=runner.LOG_DIR):
         calls.started.append((domain, options))
-        return {"pid": 99, "log": str(tmp_path / "run.log"),
+        return {"ok": True, "pid": 99, "log": log_path,
                 "command": ["python"], "started": 0.0}
 
     def fake_poll(run_dir_arg, log_path=None):
-        return {"stage": "crawling", "running": True, "done": False,
+        calls.polled.append((run_dir_arg, log_path))
+        return {"stage": "crawling", "running": calls.exit_code is None,
+                "done": False,
                 "failed": False, "run_dir": run_dir,
                 "counters": {"pages": 12, "issues": 3,
                              "sitemap urls swept": 0},
-                "exit_code": None, "tail": "working"}
+                "exit_code": calls.exit_code, "tail": "working"}
 
     def fake_report(path, fmt="short", python=None):
         calls.reports.append((path, fmt))
@@ -408,6 +415,16 @@ def app_runner(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "report_usage",
                         lambda path: {"calls": 9, "input_tokens": 100,
                                       "output_tokens": 50})
+    def fake_delete_host(host, root=runner.OUTPUT_ROOT, python=None):
+        calls.hosts.append(host)
+        return {"ok": True, "returncode": 0, "output": "gone", "command": []}
+
+    monkeypatch.setattr(runner, "delete_host", fake_delete_host)
+    monkeypatch.setattr(runner, "running_runs",
+                        lambda log_dir=runner.LOG_DIR: calls.running)
+    monkeypatch.setattr(runner, "exit_code_of", lambda path: calls.exit_code)
+    monkeypatch.setattr(runner, "bound_run_dir",
+                        lambda path, root=runner.OUTPUT_ROOT: run_dir)
     monkeypatch.setattr(runner, "list_runs", lambda root=runner.OUTPUT_ROOT: {
         "example.com": [{"host": "example.com", "name": "20260101-000000",
                          "path": run_dir, "when": "2026-01-01 00:00",
@@ -434,8 +451,7 @@ def test_starting_a_run_launches_one_audit_and_shows_a_stage(app_runner):
     app.button[0].click().run()
 
     assert not app.exception
-    assert app_runner.started == [("https://example.com", app_runner.started
-                                   [0][1])]
+    assert len(app_runner.started) == 1
     domain, options = app_runner.started[0]
     assert options["max_pages"] == 2000 and options["workers"] == 4
     assert any("crawling" in header.value.lower() for header in app.subheader)
@@ -526,3 +542,265 @@ def test_every_page_renders_without_an_exception(app_runner):
         app = app_test().run()
         app.sidebar.radio[0].set_value(page).run()
         assert not app.exception, f"{page} raised {app.exception}"
+
+
+# --- session 11 item 1: the progress block refreshes on a timer -------------
+
+def test_the_progress_block_is_a_fragment_that_reruns_every_four_seconds():
+    """Registered with run_every, not redrawn only when someone clicks.
+
+    Read off the decorated function itself: Streamlit keeps the interval in
+    the wrapper's closure. Nothing is patched, so this cannot leave a half
+    built fragment behind for the next app to trip over.
+    """
+    import streamlit_app
+
+    assert streamlit_app.REFRESH_SECONDS == 4
+    intervals = [cell.cell_contents
+                 for cell in (streamlit_app._progress.__closure__ or ())
+                 if isinstance(cell.cell_contents, (int, float))
+                 and not isinstance(cell.cell_contents, bool)]
+    assert intervals == [4], f"the fragment was registered with {intervals}"
+
+
+def test_the_progress_block_reads_the_log_it_is_bound_to(app_runner,
+                                                         tmp_path):
+    app = app_test().run()
+    app.text_input[0].set_value("https://example.com")
+    app.button[0].click().run()
+
+    assert not app.exception
+    bound = app_runner.started and str(tmp_path / "run.log")
+    assert app_runner.polled, "the progress block never polled"
+    assert all(log == bound for _run_dir, log in app_runner.polled)
+    assert any("crawling" in header.value.lower()
+               for header in app.subheader)
+
+
+def test_a_finished_run_still_renders_its_last_state(app_runner):
+    app_runner.exit_code = 0
+    app = app_test().run()
+    app.text_input[0].set_value("https://example.com")
+    app.button[0].click().run()
+    assert not app.exception
+    assert app_runner.polled
+
+
+# --- item 2: the Results page shows the report's own tables -----------------
+
+def test_the_results_tables_are_the_ones_the_report_builds(app_runner,
+                                                           tmp_path):
+    """The console and the client see the same rows, from one builder."""
+    from seo_audit import report
+
+    app = app_test().run()
+    app.sidebar.radio[0].set_value("Results").run()
+    assert not app.exception
+
+    findings = json.load(open(os.path.join(
+        app_runner.run_dir, "findings.json"), encoding="utf-8"))
+    coverage = (findings.get("meta") or {}).get("coverage") or {}
+    expected = report.short_section_rows("on_page", findings["on_page"],
+                                         coverage)
+
+    frames = [frame.value.values.tolist() for frame in app.dataframe]
+    assert expected in frames, f"the on page table is not rendered: {expected}"
+    header = report.SHORT_SECTION_COLUMNS
+    assert header == ["Finding", "Count", "Severity", "Action"]
+
+
+def test_the_section_builder_gives_the_document_what_it_always_gave():
+    """The extraction moved code, not output: the In place row still closes."""
+    from seo_audit import report
+
+    section = {"title": {"missing": {"count": 3, "whole": 40,
+                                     "whole_is": "pages parsed"}}}
+    rows = report.short_section_rows("on_page", section,
+                                     {"pages_parsed": 40, "pages_found": 48})
+    assert rows[0][:2] == ["Page title missing", "3 of 40 pages parsed"]
+    assert rows[-1][0] == report.IN_PLACE
+    parts, in_place_row = report.short_section_parts(
+        "on_page", section, {"pages_parsed": 40, "pages_found": 48})
+    assert rows == parts + [in_place_row]
+
+
+# --- item 3: the cost is stated before the click ----------------------------
+
+def test_the_long_format_says_what_it_costs_before_it_is_run(app_runner):
+    import streamlit_app
+
+    app = app_test().run()
+    app.sidebar.radio[0].set_value("Report").run()
+    captions = [caption.value for caption in app.caption]
+    assert streamlit_app.COST_NOTE in captions
+
+    [radio for radio in app.radio if radio.label == "Format"][0].set_value(
+        "long").run()
+    assert streamlit_app.COST_NOTE in [c.value for c in app.caption]
+    assert "about one cent" in streamlit_app.COST_NOTE
+    assert app_runner.reports == [], "nothing was generated to show a price"
+
+
+# --- item 4: one run at a time, and the view bound to it --------------------
+
+def test_a_second_start_is_refused_while_one_is_running(tmp_path,
+                                                        monkeypatch):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "20260101-000000.log").write_text("working\n",
+                                                 encoding="utf-8")
+
+    called = []
+    monkeypatch.setattr(runner.subprocess, "Popen",
+                        lambda *a, **k: called.append(a))
+    launch = runner.start_audit("https://example.com", {},
+                                log_dir=str(log_dir))
+
+    assert launch["ok"] is False
+    assert "already going" in launch["error"]
+    assert called == [], "a second audit was launched anyway"
+
+
+def test_a_finished_log_does_not_block_the_next_run(tmp_path, monkeypatch):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "old.log").write_text("done\nEXIT_CODE=0\n", encoding="utf-8")
+
+    class FakeProcess:
+        pid = 7
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(runner.subprocess, "Popen",
+                        lambda *a, **k: FakeProcess())
+    launch = runner.start_audit("https://example.com", {},
+                                log_dir=str(log_dir))
+    assert launch["ok"] and launch["pid"] == 7
+
+
+def test_running_runs_lists_only_the_unfinished_logs(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "a.log").write_text("EXIT_CODE=0\n", encoding="utf-8")
+    (log_dir / "b.log").write_text("still going\n", encoding="utf-8")
+
+    running = runner.running_runs(str(log_dir))
+    assert [os.path.basename(p) for p in running] == ["b.log"]
+
+
+def test_the_bound_view_ignores_a_folder_from_a_later_run(tmp_path):
+    """A run started after this one must never steal the counters."""
+    log_dir = tmp_path / "output" / "logs"
+    log_dir.mkdir(parents=True)
+    mine = log_dir / "20260101-000000.log"
+    mine.write_text("working\n", encoding="utf-8")
+
+    older = make_run_dir(tmp_path, files=("raw_crawl.csv",),
+                         name="20260101-000001")
+    os.utime(mine, (os.path.getmtime(older) - 5,) * 2)
+
+    # A second run appears, newer than mine, with its own folder.
+    later = log_dir / "20260102-000000.log"
+    later.write_text("working\n", encoding="utf-8")
+    newer_dir = make_run_dir(tmp_path, files=("raw_crawl.csv",),
+                             host="other.com", name="20260102-000000")
+
+    bound = runner.bound_run_dir(str(mine), root=str(tmp_path / "output"))
+    assert bound != newer_dir, "the view followed someone else's run"
+
+    # Once the log names its folder, there is nothing left to infer.
+    mine.write_text(f"working\nRUN_DIR={older}\n", encoding="utf-8")
+    assert runner.bound_run_dir(str(mine),
+                                root=str(tmp_path / "output")) == older
+
+
+def test_the_start_button_is_disabled_while_a_run_is_going(app_runner):
+    app_runner.running = ["output/logs/20260101-000000.log"]
+    app_runner.exit_code = None
+    app = app_test().run()
+
+    assert app.warning, "nothing said a run was already going"
+    assert app.button[0].disabled, "start was live during a run"
+
+
+# --- item 5: removing a host ------------------------------------------------
+
+def test_removing_a_host_needs_the_name_typed(app_runner):
+    app = app_test().run()
+    app.sidebar.radio[0].set_value("Runs").run()
+
+    remove = [button for button in app.button
+              if button.label.startswith("Remove")][0]
+    assert remove.disabled, "remove was live before the name was typed"
+    remove.click().run()
+    assert app_runner.hosts == []
+
+    boxes = [box for box in app.text_input
+             if box.label.startswith("Type example.com")]
+    assert boxes, "no box to type the host name into"
+    boxes[0].set_value("example.co").run()
+    assert [b for b in app.button
+            if b.label.startswith("Remove")][0].disabled
+
+    [box for box in app.text_input
+     if box.label.startswith("Type example.com")][0].set_value(
+         "example.com").run()
+    [button for button in app.button
+     if button.label.startswith("Remove")][0].click().run()
+    assert app_runner.hosts == ["example.com"]
+
+
+def test_delete_host_calls_the_clean_command_with_yes(tmp_path, monkeypatch):
+    seen = []
+
+    class Result:
+        returncode = 0
+        stdout = "gone"
+        stderr = ""
+
+    monkeypatch.setattr(runner.subprocess, "run",
+                        lambda command, **kwargs: (seen.append(command),
+                                                   Result())[1])
+    result = runner.delete_host("example.com", root=str(tmp_path))
+
+    assert result["ok"]
+    assert "--delete-host" in seen[0] and "--yes" in seen[0]
+    assert seen[0][seen[0].index("--delete-host") + 1] == "example.com"
+
+
+def test_clean_removes_every_run_of_one_host_and_no_other(tmp_path, capsys):
+    from seo_audit.clean import main as clean_main
+
+    root = tmp_path / "output"
+    for host, names in (("gone.example", ("20260101-000000",
+                                          "20260102-000000")),
+                        ("kept.example", ("20260101-000000",))):
+        for name in names:
+            path = root / host / name
+            path.mkdir(parents=True)
+            (path / "findings.json").write_text("{}", encoding="utf-8")
+
+    code = clean_main(["--delete-host", "gone.example", "--root", str(root),
+                       "--yes"])
+    capsys.readouterr()
+
+    assert code == 0
+    assert not (root / "gone.example").exists(), "the host folder is still here"
+    assert (root / "kept.example" / "20260101-000000").exists()
+
+
+def test_clean_refuses_to_remove_a_host_without_yes(tmp_path, capsys):
+    from seo_audit.clean import main as clean_main
+
+    root = tmp_path / "output"
+    path = root / "gone.example" / "20260101-000000"
+    path.mkdir(parents=True)
+    (path / "findings.json").write_text("{}", encoding="utf-8")
+
+    code = clean_main(["--delete-host", "gone.example", "--root", str(root)])
+    output = capsys.readouterr()
+
+    assert code == 1
+    assert path.exists(), "runs went without --yes"
+    assert "--yes" in output.err

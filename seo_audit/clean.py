@@ -117,6 +117,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Delete all but the newest run for HOST.")
     parser.add_argument("--delete-all", metavar="HOST", default=None,
                         help="Delete every run for HOST except the newest.")
+    parser.add_argument("--delete-host", metavar="HOST", default=None,
+                        help="Delete EVERY run for HOST, the newest one "
+                             "included, and the host folder with them. The "
+                             "only path that does not keep a run, so it "
+                             "needs --yes.")
     parser.add_argument("--older-than", metavar="DAYS", type=float, default=None,
                         help="Delete runs older than DAYS across all hosts, "
                              "always keeping the newest per host.")
@@ -125,11 +130,43 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _remove_host(runs: Dict[str, List[Run]], host: str, root: str,
+                 yes: bool) -> int:
+    """Every run for one host, the newest included, and the folder itself.
+
+    The only path in this file that leaves a host with nothing. It is not
+    offered behind a y/N prompt: whoever asks for it says --yes on the
+    command line, so it can never happen by leaning on the return key.
+    """
+    doomed = runs.get(host, [])
+    total_kb = round(sum(r.size_bytes for r in doomed) / 1024)
+    print(f"About to delete ALL {len(doomed)} run(s) for {host}, "
+          f"{total_kb} KB, including the newest:")
+    for run in doomed:
+        print(f"  {run.host}/{run.name}  {run.size_kb} KB  {run.when}")
+    if not yes:
+        print("Refusing without --yes: this is the one delete that keeps "
+              "nothing.", file=sys.stderr)
+        return 1
+
+    for run in doomed:
+        shutil.rmtree(run.path, ignore_errors=True)
+    host_dir = os.path.join(root, host)
+    try:
+        if os.path.isdir(host_dir) and not os.listdir(host_dir):
+            os.rmdir(host_dir)
+    except OSError:
+        pass
+    print(f"Deleted {len(doomed)} run(s), {total_kb} KB freed. "
+          f"{host} is gone.")
+    return 0
+
+
 def main(argv=None, input_fn=input) -> int:
     args = build_parser().parse_args(argv)
     runs = find_runs(args.root)
 
-    host = args.delete or args.delete_all
+    host = args.delete or args.delete_all or args.delete_host
     if host is None and args.older_than is None:
         print(format_listing(runs))
         return 0
@@ -138,6 +175,9 @@ def main(argv=None, input_fn=input) -> int:
         print(f"No runs found for host {host!r} under {args.root}/",
               file=sys.stderr)
         return 1
+
+    if args.delete_host:
+        return _remove_host(runs, args.delete_host, args.root, args.yes)
 
     doomed = select_for_deletion(runs, host=host,
                                  delete_all=args.delete_all is not None,

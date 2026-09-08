@@ -87,9 +87,34 @@ def wrapped_command(command: List[str], log_path: str,
     return [python or sys.executable, "-c", WRAPPER, log_path] + command
 
 
+def running_runs(log_dir: str = LOG_DIR) -> List[str]:
+    """Logs with no exit code line: the runs still going, newest first.
+
+    The wrapper writes EXIT_CODE at the end of every run it launches, so a
+    log without one is a run that has not finished. Nothing here asks the
+    operating system about processes and nothing is remembered in memory.
+    """
+    if not os.path.isdir(log_dir):
+        return []
+    logs = [os.path.join(log_dir, name) for name in os.listdir(log_dir)
+            if name.endswith(".log")]
+    running = [path for path in logs if exit_code_of(path) is None]
+    return sorted(running, key=os.path.getmtime, reverse=True)
+
+
 def start_audit(domain: str, options: Optional[Dict[str, Any]] = None,
                 log_dir: str = LOG_DIR) -> Dict[str, Any]:
-    """Launch the audit as its own process. Returns its pid and log path."""
+    """Launch the audit as its own process. Returns its pid and log path.
+
+    One at a time. Two crawls of the same site at once are two sets of
+    counters, two folders and one confused operator, so a second start is
+    refused while the first has not written its exit code.
+    """
+    busy = running_runs(log_dir)
+    if busy:
+        return {"ok": False, "running": busy, "log": None, "pid": None,
+                "error": f"A run is already going: {busy[0]}. Wait for it to "
+                         f"finish, or look at its log."}
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir,
                             f"{time.strftime('%Y%m%d-%H%M%S')}.log")
@@ -107,8 +132,8 @@ def start_audit(domain: str, options: Optional[Dict[str, Any]] = None,
     finally:
         # The child holds its own handle on the file from here on.
         handle.close()
-    return {"pid": process.pid, "log": log_path, "command": command,
-            "started": time.time()}
+    return {"ok": True, "pid": process.pid, "log": log_path,
+            "command": command, "started": time.time()}
 
 
 # --- reading a run back -----------------------------------------------------
@@ -228,22 +253,38 @@ def attach(log_dir: str = LOG_DIR, root: str = OUTPUT_ROOT
     """The run still in flight, if this console was restarted under one.
 
     A run is in flight when its log has no exit code and its folder has no
-    findings.json. Newest first, because that is the one an operator means.
+    findings.json. Only one can be, because only one is ever started, so
+    there is nothing to choose between.
     """
-    if not os.path.isdir(log_dir):
-        return None
-    logs = sorted((os.path.join(log_dir, name)
-                   for name in os.listdir(log_dir) if name.endswith(".log")),
-                  key=os.path.getmtime, reverse=True)
-    for log_path in logs:
-        if exit_code_of(log_path) is not None:
-            continue
+    for log_path in running_runs(log_dir):
         run_dir = run_dir_of(log_path) or newest_run_dir(
             since=os.path.getmtime(log_path), root=root)
         if run_dir and _exists(run_dir, "findings.json"):
             continue
         return {"log": log_path, "run_dir": run_dir}
     return None
+
+
+def bound_run_dir(log_path: str, root: str = OUTPUT_ROOT) -> Optional[str]:
+    """The folder belonging to one log, and to no other run.
+
+    The audit announces its folder in the log once the host is settled. Until
+    then the only candidate is a folder written after that log began, so a
+    run started later can never be mistaken for this one.
+    """
+    if not log_path or not os.path.exists(log_path):
+        return None
+    named = run_dir_of(log_path)
+    if named:
+        return named
+    started = os.path.getmtime(log_path)
+    newer = [path for path in running_runs(os.path.dirname(log_path))
+             if path != log_path and os.path.getmtime(path) > started]
+    if newer:
+        # Another run began after this one. Guessing by folder age could hand
+        # back its folder, so this one says it does not know yet.
+        return None
+    return newest_run_dir(since=started, root=root)
 
 
 # --- the other two commands -------------------------------------------------
@@ -309,6 +350,23 @@ def list_runs(root: str = OUTPUT_ROOT) -> Dict[str, List[Dict[str, Any]]]:
         if found:
             runs[host] = found
     return runs
+
+
+def delete_host(host: str, root: str = OUTPUT_ROOT,
+                python: Optional[str] = None) -> Dict[str, Any]:
+    """Remove a host and every run it has, through the clean command.
+
+    The only call that leaves a host with nothing, so it is its own function
+    rather than another flag on delete_runs: nobody reaches it by passing a
+    boolean by mistake.
+    """
+    command = [python or sys.executable, "-m", "seo_audit.clean",
+               "--delete-host", host, "--root", root, "--yes"]
+    result = subprocess.run(command, capture_output=True, text=True,
+                            cwd=os.getcwd())
+    return {"ok": result.returncode == 0, "returncode": result.returncode,
+            "output": (result.stdout or "") + (result.stderr or ""),
+            "command": command}
 
 
 def delete_runs(host: str, all: bool = False, root: str = OUTPUT_ROOT,

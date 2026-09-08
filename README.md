@@ -339,20 +339,50 @@ delete folders. Everything it shows comes from `findings.json`,
 
 **Run audit.** Domain, optional sitemap, page and worker limits, PageSpeed on
 or off, comparison on or off, and an advanced expander for the sweep and
-external check limits. Starting a run launches the command and shows the
-stage, the counters and the tail of the log, refreshing while it runs.
+external check limits. Starting a run launches the command; the progress
+block below is a fragment that re-reads the run's files **every four
+seconds** while it goes, and stops asking once the run writes its exit code.
+A "Refresh now" button is there for anyone who does not want to wait.
+
+**One audit at a time.** The Start button is disabled while any log has no
+exit code, and says which run is going. The progress view is bound to the log
+the page launched, kept in the session, so a run started elsewhere can never
+walk into these counters; on reload it binds to the single running log. Until
+the audit announces its folder, a run that began later blocks the guess
+rather than risking the wrong folder.
 
 **Results.** Pick a host and a run: the score and its components, the priority
-fixes, one expander per section, the comparison when there is one, and a
-download button for each of the eight run files.
+fixes, one expander per section holding **the same table the short report
+prints** (Finding, Count with its whole, Severity, Action, and the In place
+row), the comparison when there is one, and a download button for each of the
+eight run files. Both come from one builder in `report.py`, so the console and
+the client never disagree.
 
 **Report.** Pick a run, choose short (the default, no model calls) or long,
-generate, and download the .docx. The long format's calls and tokens are read
-back from `report_usage.json`.
+generate, and download the .docx. What the long format costs is stated next
+to the choice, before the click: about ten calls and about one cent. Its
+calls and tokens are read back from `report_usage.json` afterwards.
 
-**Runs.** Every run folder with its date, size and whether it finished.
-Deleting is behind a confirmation checkbox and goes through the clean
-command, which never removes a host's newest run.
+**Runs.** Every run folder with its date, size and whether it finished. The
+two delete buttons need a ticked confirmation and go through the clean
+command, which keeps each host's newest run. **Removing a host entirely** is
+separate: type the host name exactly to activate it, and it calls
+`--delete-host`, the one path that keeps nothing.
+
+### Team setup
+
+```bash
+git clone <this repo> && cd SEO-Audit
+python -m venv venv && venv\Scripts\activate     # macOS or Linux: source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env                              # then put the two keys in it
+streamlit run app/streamlit_app.py
+```
+
+Python 3.11 or newer. The two keys are `OPENAI_API_KEY` (only for
+`--format long`) and `PAGESPEED_API_KEY` (only for the speed sample); the
+console runs without either, and the short report needs neither. Nothing
+reads `.env` except the commands themselves.
 
 **Runs survive the browser.** The audit is its own process, so closing the tab
 or restarting Streamlit does not stop it. Progress is read from the run
