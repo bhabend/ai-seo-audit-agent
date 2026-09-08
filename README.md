@@ -325,6 +325,51 @@ site.
 
 `--compare-to PATH` picks a specific folder; `--no-compare` switches it off.
 
+## Search Console mode
+
+```bash
+python -m seo_audit.gsc --run output/example.com/20260101-120000 \
+                        --export ~/Downloads/example-performance.zip
+```
+
+A separate step over a finished run, not a second crawl. The crawl says what
+the site is; the export says what search engines did with it, and several
+findings exist only where the two meet.
+
+**What to ask the client for.** In Search Console, open Performance, set the
+date range to the last 16 months, and use Export at the top right. The zip
+holds a CSV per tab: Pages, Queries, Countries, Devices, Dates and Search
+appearance. Pages and Queries are the two that matter, and Dates is what
+lets the report state the period the numbers cover. A "Queries by page"
+export, or any table pairing a search with a page, also answers whether two
+pages compete for the same search; without one the report says so instead of
+guessing.
+
+**What it does.** Tables are found by shape rather than by name, so headers in
+another language, semicolon separated files and decimal commas all read
+correctly. Every address is normalised before matching, so an export that
+writes `example.com/a`, `www.example.com/a/` or `EXAMPLE.COM/a/` still finds
+the page the crawl saw, including through a redirect. The join writes
+`gsc_join.csv` into the run folder, adds a `search_performance` block to
+`findings.json`, sets the run's mode to `full` and appends five kinds of
+finding to `page_issues.csv`: impressions on a page hidden from search,
+impressions on a page that names another as preferred, a sitemap page never
+shown, a page with no links in that earns clicks, and a search answered by
+more than one page. Attach a second export and the previous answer is
+replaced, never doubled. `crawl_summary.json` is never touched.
+
+**What the report gains.** Both formats render Search performance: one
+sentence with the totals and the date range, a coverage table stating what
+share of the export met the crawl, the search findings as rows with their
+wholes and actions, the searches sitting between position 4 and 15, and the
+searches answered by more than one page. These findings are recorded but
+never scored, because they describe what search did rather than what is
+wrong with a page.
+
+**The console.** The Results page has an uploader for the selected run. The
+export is written to a temporary file, handed to the command and deleted:
+**the client's export is not kept**, only the audit's own join file.
+
 ## The console
 
 ```bash
@@ -345,7 +390,11 @@ seconds** while it goes, and stops asking once the run writes its exit code.
 A "Refresh now" button is there for anyone who does not want to wait.
 
 **One audit at a time.** The Start button is disabled while any log has no
-exit code, and says which run is going. The progress view is bound to the log
+exit code, and says which run is going. A log that never wrote an exit code
+and has been quiet for **more than 24 hours** is treated as stopped: the
+machine it ran on is gone, so it no longer blocks a new run, and the Runs
+page lists it under "stopped without finishing" with its last lines. It is
+never silently dropped. The progress view is bound to the log
 the page launched, kept in the session, so a run started elsewhere can never
 walk into these counters; on reload it binds to the single running log. Until
 the audit announces its folder, a run that began later blocks the guess
@@ -359,8 +408,11 @@ eight run files. Both come from one builder in `report.py`, so the console and
 the client never disagree.
 
 **Report.** Pick a run, choose short (the default, no model calls) or long,
-generate, and download the .docx. What the long format costs is stated next
-to the choice, before the click: about ten calls and about one cent. Its
+generate, and download the .docx. The page says which mode the run is in,
+baseline or full. What the long format costs is stated next to the choice,
+before the click: about ten calls and about one cent. If no `OPENAI_API_KEY`
+is configured the long format is refused with one plain sentence rather than
+a traceback, and the key itself is never displayed. Its
 calls and tokens are read back from `report_usage.json` afterwards.
 
 **Runs.** Every run folder with its date, size and whether it finished. The

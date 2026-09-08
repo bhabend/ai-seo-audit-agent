@@ -104,6 +104,31 @@
       "points": 2,
       "scope": "page"
     },
+    "gsc_impressions_on_noindex": {
+      "bucket": "indexability",
+      "points": 0,
+      "scope": "page"
+    },
+    "gsc_impressions_on_off_canonical": {
+      "bucket": "indexability",
+      "points": 0,
+      "scope": "page"
+    },
+    "gsc_orphan_page_with_clicks": {
+      "bucket": "indexability",
+      "points": 0,
+      "scope": "page"
+    },
+    "gsc_query_cannibalised": {
+      "bucket": "indexability",
+      "points": 0,
+      "scope": "page"
+    },
+    "gsc_sitemap_page_no_impressions": {
+      "bucket": "indexability",
+      "points": 0,
+      "scope": "page"
+    },
     "h1_missing": {
       "bucket": "on_page",
       "points": 6,

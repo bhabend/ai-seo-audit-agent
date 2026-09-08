@@ -145,6 +145,14 @@ PAGE_ISSUE_SEVERITY: Dict[str, str] = {
     # different statement from "we looked and there is nothing to report".
     "performance_no_field_data": "unmeasured",
     "pagespeed_error": "unmeasured",
+    # search performance, recorded only when a Search Console export has
+    # been attached to the run. They describe what search engines did with a
+    # page, not what is wrong with the page, so they are never scored.
+    "gsc_impressions_on_noindex": "high",
+    "gsc_impressions_on_off_canonical": "medium",
+    "gsc_sitemap_page_no_impressions": "low",
+    "gsc_orphan_page_with_clicks": "medium",
+    "gsc_query_cannibalised": "medium",
     # site level, recorded once on the homepage row
     "http_to_https_redirect": "high",
     "hsts_missing": "medium",
@@ -293,6 +301,26 @@ PAGE_ISSUE_META: Dict[str, tuple] = {
     "near_duplicate_content": ("pages with almost the same text",
                                "{count} groups of pages carry almost the same "
                                "text", "group"),
+    "gsc_impressions_on_noindex": (
+        "page hidden from search still appears in search",
+        "{count} of {whole} pages that appeared in search are hidden from "
+        "search", "page"),
+    "gsc_impressions_on_off_canonical": (
+        "page that appears in search names another page as preferred",
+        "{count} of {whole} pages that appeared in search name a different "
+        "page as the preferred one", "page"),
+    "gsc_sitemap_page_no_impressions": (
+        "page in the sitemap never appeared in search",
+        "{count} of {whole} pages listed in the sitemap were never shown in "
+        "search results", "page"),
+    "gsc_orphan_page_with_clicks": (
+        "page with no links to it is earning clicks",
+        "{count} of {whole} pages with no links from the site still bring "
+        "visitors in from search", "page"),
+    "gsc_query_cannibalised": (
+        "one search answered by several pages",
+        "{count} searches are answered by more than one page of the site",
+        "group"),
     "http_to_https_redirect": ("insecure address does not redirect",
                                "the insecure address of the site does not send "
                                "visitors to the secure one", "site"),
@@ -431,6 +459,21 @@ PAGE_ISSUE_ACTION: Dict[str, str] = {
         "from real people.",
     "pagespeed_error":
         "No action needed, speed could not be measured for this template.",
+    "gsc_impressions_on_noindex":
+        "Decide whether these pages should be found: remove the hidden from "
+        "search instruction, or accept that the impressions will stop.",
+    "gsc_impressions_on_off_canonical":
+        "Point the preferred address at the page people are actually "
+        "landing on, or move the content to the preferred page.",
+    "gsc_sitemap_page_no_impressions":
+        "Give these pages a reason to be found, or take them out of the "
+        "sitemap.",
+    "gsc_orphan_page_with_clicks":
+        "Link to these pages from the relevant section: they earn visitors "
+        "with no help from the site at all.",
+    "gsc_query_cannibalised":
+        "Choose one page for each of these searches and point the others at "
+        "it, so the two stop competing.",
     "http_to_https_redirect":
         "Ask the developers to send the insecure address on to the secure "
         "one.",

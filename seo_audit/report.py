@@ -462,12 +462,7 @@ def build_document(findings: Dict, narrator: Narrator, charts: Dict,
         document.add_heading("Comparison with the previous audit", level=1)
         _add_comparison(document, comparison, narrator)
 
-    document.add_heading("Search performance", level=1)
-    document.add_paragraph(strip_dashes(
-        "Search Console data was not provided for this audit, so this report "
-        "does not cover what people searched for, how often the site "
-        "appeared, or how often it was clicked. Supply a Search Console "
-        "export and a later audit can include it."))
+    _add_search_performance(document, findings, short=False)
 
     document.add_heading("Appendix", level=1)
     links = findings.get("links") or {}
@@ -940,10 +935,7 @@ def build_short_document(findings: Dict, charts: Dict, host: str) -> Any:
         document.add_heading("Comparison with the previous audit", level=1)
         _short_comparison(document, comparison)
 
-    document.add_heading("Search performance", level=1)
-    document.add_paragraph(strip_dashes(
-        "Search Console data was not supplied, so this report does not cover "
-        "what people searched for or how often the site was clicked."))
+    _add_search_performance(document, findings, short=True)
 
     document.add_heading("Appendix", level=1)
     links = findings.get("links") or {}
@@ -988,6 +980,128 @@ def _short_comparison(document, comparison: Dict) -> None:
                    [[_metric_label(n["metric"]), n["previous"], n["now"],
                      n["change"], n.get("note", "")]
                     for n in notable[:APPENDIX_ROWS]])
+
+
+# --- search performance, when an export has been attached -------------------
+
+NOT_PROVIDED_SHORT = (
+    "Search Console data was not supplied, so this report does not cover "
+    "what people searched for or how often the site was clicked.")
+NOT_PROVIDED_LONG = (
+    "Search Console data was not provided for this audit, so this report "
+    "does not cover what people searched for, how often the site appeared, "
+    "or how often it was clicked. Supply a Search Console export and a later "
+    "audit can include it.")
+SEARCH_COVERAGE_COLUMNS = ["Measure", "Count"]
+NEAR_MISS_COLUMNS = ["Search", "Impressions", "Clicks", "Position"]
+CANNIBAL_COLUMNS = ["Search", "Pages", "Impressions"]
+SEARCH_TABLE_ROWS = 10
+
+
+def search_lead(block: Dict) -> str:
+    """One sentence: how much search data there is and what period it covers."""
+    totals = block.get("totals") or {}
+    period = block.get("date_range") or "a period the export does not state"
+    return (f"Search Console recorded "
+            f"{totals.get('impressions', 0)} impressions and "
+            f"{totals.get('clicks', 0)} clicks across "
+            f"{totals.get('pages_in_export', 0)} pages and "
+            f"{totals.get('queries_in_export', 0)} searches, covering "
+            f"{period}.")
+
+
+def search_coverage_rows(block: Dict) -> List[List[str]]:
+    """How much of the export met the crawl, each count with its whole."""
+    join = block.get("join") or {}
+    labels = {
+        "matched": "Pages in the export the crawl also saw",
+        "not_crawled": "Pages in the export the crawl never reached",
+        "crawled_not_in_export": "Pages crawled that search has never shown",
+    }
+    rows = []
+    for key, label in labels.items():
+        share = join.get(key) or {}
+        rows.append([label, f"{share.get('count', 0)} of "
+                            f"{share.get('whole', 0)} "
+                            f"{share.get('whole_is', '')}".strip()])
+    return rows
+
+
+def near_miss_rows(block: Dict) -> List[List[str]]:
+    """Searches the site is close to winning, worst position last."""
+    return [[row.get("query", ""), row.get("impressions", 0),
+             row.get("clicks", 0), row.get("position", 0)]
+            for row in (block.get("near_miss_queries") or []
+                        )[:SEARCH_TABLE_ROWS]]
+
+
+def cannibalised_rows(block: Dict) -> List[List[str]]:
+    return [[row.get("query", ""), len(row.get("pages") or []),
+             row.get("impressions", 0)]
+            for row in (block.get("cannibalised_queries") or []
+                        )[:SEARCH_TABLE_ROWS]]
+
+
+def search_issue_rows(block: Dict) -> List[List[str]]:
+    """The findings only the crawl and the export together can produce."""
+    from .issues import PAGE_ISSUE_ACTION, PAGE_ISSUE_SEVERITY
+
+    counts = block.get("issue_counts") or {}
+    wholes = block.get("wholes") or {}
+    from .findings import GSC_WHOLES
+
+    rows = []
+    for issue_type, count in counts.items():
+        if not count:
+            continue
+        key, whole_is = GSC_WHOLES.get(issue_type, ("", "findings"))
+        whole = wholes.get(key) or count
+        rows.append((SEVERITY_RANK.get(
+            PAGE_ISSUE_SEVERITY.get(issue_type, "low"), 2), -count,
+            [label_of(issue_type).capitalize(),
+             f"{min(count, whole)} of {whole} {whole_is}",
+             PAGE_ISSUE_SEVERITY.get(issue_type, "low"),
+             PAGE_ISSUE_ACTION.get(issue_type, "")]))
+    rows.sort(key=lambda item: (item[0], item[1]))
+    return [row for _rank, _count, row in rows]
+
+
+def _add_search_performance(document, findings: Dict, short: bool) -> None:
+    """The section, in whichever format is being written."""
+    block = findings.get("search_performance") or {}
+    document.add_heading("Search performance", level=1)
+    if not block.get("provided"):
+        document.add_paragraph(strip_dashes(
+            NOT_PROVIDED_SHORT if short else NOT_PROVIDED_LONG))
+        return
+
+    document.add_paragraph(strip_dashes(search_lead(block)))
+    _add_table(document, SEARCH_COVERAGE_COLUMNS,
+               search_coverage_rows(block))
+
+    issue_rows = search_issue_rows(block)
+    if issue_rows:
+        _add_table(document, SHORT_SECTION_COLUMNS, issue_rows)
+
+    near = near_miss_rows(block)
+    if near:
+        document.add_heading("Searches the site nearly wins", level=2)
+        document.add_paragraph(strip_dashes(
+            f"{len(block.get('near_miss_queries') or [])} searches sit "
+            f"between position 4 and 15, where a small gain moves a page on "
+            f"to the first screen. The {len(near)} with the most "
+            f"impressions:"))
+        _add_table(document, NEAR_MISS_COLUMNS, near)
+
+    cannibal = cannibalised_rows(block)
+    if cannibal:
+        document.add_heading("Searches answered by more than one page",
+                             level=2)
+        _add_table(document, CANNIBAL_COLUMNS, cannibal)
+    elif not block.get("cannibalisation_available"):
+        document.add_paragraph(strip_dashes(
+            "The export pairs no searches with pages, so this report cannot "
+            "say whether two pages compete for the same search."))
 
 
 def expected_headings_for_short(findings: Dict) -> List[str]:

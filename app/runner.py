@@ -87,19 +87,47 @@ def wrapped_command(command: List[str], log_path: str,
     return [python or sys.executable, "-c", WRAPPER, log_path] + command
 
 
+# A run whose log has not been touched for this long, and which never wrote
+# an exit code, was killed with the machine rather than finished. Nothing can
+# be assumed about it, but it must not block the console forever.
+STALE_AFTER_HOURS = 24
+
+
+def _unfinished(log_dir: str) -> List[str]:
+    if not os.path.isdir(log_dir):
+        return []
+    logs = [os.path.join(log_dir, name) for name in os.listdir(log_dir)
+            if name.endswith(".log")]
+    return sorted((path for path in logs if exit_code_of(path) is None),
+                  key=os.path.getmtime, reverse=True)
+
+
+def is_stale(log_path: str, hours: float = STALE_AFTER_HOURS) -> bool:
+    """True when a log has no exit code and has gone quiet for too long."""
+    if not log_path or not os.path.exists(log_path):
+        return False
+    if exit_code_of(log_path) is not None:
+        return False
+    return (time.time() - os.path.getmtime(log_path)) > hours * 3600
+
+
+def stale_runs(log_dir: str = LOG_DIR) -> List[str]:
+    """Runs that stopped without saying so. Shown, never silently ignored."""
+    return [path for path in _unfinished(log_dir) if is_stale(path)]
+
+
 def running_runs(log_dir: str = LOG_DIR) -> List[str]:
     """Logs with no exit code line: the runs still going, newest first.
 
     The wrapper writes EXIT_CODE at the end of every run it launches, so a
     log without one is a run that has not finished. Nothing here asks the
     operating system about processes and nothing is remembered in memory.
+
+    A log that has been silent for a day is left out: the machine it was
+    running on is long gone, and one lost run must not stop every run after
+    it. The Runs page still lists it, so it disappears from nobody's view.
     """
-    if not os.path.isdir(log_dir):
-        return []
-    logs = [os.path.join(log_dir, name) for name in os.listdir(log_dir)
-            if name.endswith(".log")]
-    running = [path for path in logs if exit_code_of(path) is None]
-    return sorted(running, key=os.path.getmtime, reverse=True)
+    return [path for path in _unfinished(log_dir) if not is_stale(path)]
 
 
 def start_audit(domain: str, options: Optional[Dict[str, Any]] = None,
@@ -289,9 +317,31 @@ def bound_run_dir(log_path: str, root: str = OUTPUT_ROOT) -> Optional[str]:
 
 # --- the other two commands -------------------------------------------------
 
+def has_openai_key() -> bool:
+    """Whether a key is configured. The value is never read out of here."""
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except ImportError:  # pragma: no cover - dotenv ships with the package
+        pass
+    return bool(os.environ.get("OPENAI_API_KEY", "").strip())
+
+
+NO_KEY_MESSAGE = "No OpenAI key configured; add OPENAI_API_KEY to .env"
+
+
 def generate_report(run_dir: str, fmt: str = "short",
                     python: Optional[str] = None) -> Dict[str, Any]:
-    """Run the report command over a finished run folder."""
+    """Run the report command over a finished run folder.
+
+    The long format needs a key. Finding that out from a traceback after the
+    click is a poor way to learn it, so it is checked first.
+    """
+    if fmt == "long" and not has_openai_key():
+        return {"ok": False, "docx": None, "returncode": None,
+                "message": NO_KEY_MESSAGE, "output": NO_KEY_MESSAGE,
+                "command": []}
     command = [python or sys.executable, "-m", "seo_audit.report",
                "--run", run_dir, "--format", fmt]
     result = subprocess.run(command, capture_output=True, text=True,
@@ -320,6 +370,51 @@ def report_usage(run_dir: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def attach_gsc(run_dir: str, upload: Any, filename: str = "export.zip",
+               python: Optional[str] = None) -> Dict[str, Any]:
+    """Join an uploaded Search Console export to a run.
+
+    The upload is written to a temporary file, handed to the command, and
+    deleted. Nothing of the client's export is kept: what survives is
+    gsc_join.csv, which is the audit's own answer, not their data.
+    """
+    import tempfile
+
+    suffix = os.path.splitext(filename or "")[1].lower() or ".zip"
+    data = upload.read() if hasattr(upload, "read") else upload
+    handle = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    try:
+        handle.write(data if isinstance(data, bytes) else str(data).encode())
+        handle.close()
+        command = [python or sys.executable, "-m", "seo_audit.gsc",
+                   "--run", run_dir, "--export", handle.name]
+        result = subprocess.run(command, capture_output=True, text=True,
+                                cwd=os.getcwd())
+    finally:
+        try:
+            os.unlink(handle.name)
+        except OSError:
+            pass
+    return {"ok": result.returncode == 0, "returncode": result.returncode,
+            "output": (result.stderr or "") + (result.stdout or ""),
+            "command": command}
+
+
+def run_mode(run_dir: str) -> str:
+    """What this run can answer: baseline, or full once an export is on it."""
+    import json
+
+    path = os.path.join(run_dir, "findings.json")
+    if not os.path.exists(path):
+        return "unknown"
+    try:
+        with open(path, encoding="utf-8") as handle:
+            findings = json.load(handle)
+    except (ValueError, OSError):
+        return "unknown"
+    return (findings.get("meta") or {}).get("mode", "baseline")
+
+
 def list_runs(root: str = OUTPUT_ROOT) -> Dict[str, List[Dict[str, Any]]]:
     """Every run folder on disk, newest first, per host."""
     runs: Dict[str, List[Dict[str, Any]]] = {}
@@ -346,6 +441,7 @@ def list_runs(root: str = OUTPUT_ROOT) -> Dict[str, List[Dict[str, Any]]]:
                 "files": len(files),
                 "complete": "findings.json" in files,
                 "report": any(f.lower().endswith(".docx") for f in files),
+                "search": "gsc_join.csv" in files,
             })
         if found:
             runs[host] = found

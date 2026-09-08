@@ -498,3 +498,105 @@ def test_the_lead_sentence_names_the_most_serious_not_the_largest(short_doc):
     severities = [row.cells[2].text.strip() for row in on_page.rows[1:]
                   if row.cells[0].text.strip() != IN_PLACE]
     assert severities[0] == "high"
+
+
+# --- session 12: the search performance section -----------------------------
+
+def search_block():
+    return {
+        "provided": True,
+        "date_range": "2026-01-01 to 2026-06-30",
+        "coverage_note": "Read Pages.csv (pages). Covers six months.",
+        "totals": {"impressions": 68000, "clicks": 2200,
+                   "pages_in_export": 40, "queries_in_export": 90},
+        "join": {
+            "matched": {"count": 35, "whole": 40,
+                        "whole_is": "pages in the export"},
+            "not_crawled": {"count": 5, "whole": 40,
+                            "whole_is": "pages in the export"},
+            "crawled_not_in_export": {"count": 13, "whole": 48,
+                                      "whole_is": "pages crawled"}},
+        "top_pages": [], "top_queries": [],
+        "near_miss_queries": [
+            {"query": "coworking space pune", "clicks": 12,
+             "impressions": 4300, "ctr_percent": 0.3, "position": 6.4},
+            {"query": "office space goa", "clicks": 2, "impressions": 900,
+             "ctr_percent": 0.2, "position": 11.8}],
+        "cannibalised_queries": [
+            {"query": "day pass mumbai",
+             "pages": ["https://example.com/a/", "https://example.com/b/"],
+             "impressions": 2400, "clicks": 30}],
+        "cannibalisation_available": True,
+        "issue_counts": {"gsc_impressions_on_noindex": 2,
+                         "gsc_sitemap_page_no_impressions": 13},
+        "wholes": {"pages_with_impressions": 35, "sitemap_pages": 38,
+                   "queries": 90},
+    }
+
+
+def test_the_search_section_is_one_sentence_when_no_export_is_attached(
+        short_doc):
+    document, _result = short_doc
+    texts = [p.text for p in document.paragraphs]
+    assert any("Search Console data was not supplied" in text
+               for text in texts)
+
+
+def test_the_search_section_carries_its_tables_when_an_export_is_attached(
+        short_run):
+    from docx import Document
+
+    path = os.path.join(short_run, "findings.json")
+    with open(path, encoding="utf-8") as handle:
+        findings = json.load(handle)
+    findings["search_performance"] = search_block()
+    findings["meta"]["mode"] = "full"
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(findings, handle)
+
+    result = generate_short(short_run)
+    document = Document(result["docx"])
+    texts = [p.text for p in document.paragraphs]
+
+    lead = [text for text in texts if text.startswith("Search Console recorded")]
+    assert lead, texts
+    assert "2026-01-01 to 2026-06-30" in lead[0]
+    assert "68000 impressions" in lead[0]
+
+    coverage = [t for t in document.tables
+                if [c.text for c in t.rows[0].cells] == ["Measure", "Count"]]
+    assert coverage, "no join coverage table"
+    counts = [row.cells[1].text for row in coverage[0].rows[1:]]
+    assert "35 of 40 pages in the export" in counts
+    assert all(" of " in count for count in counts)
+
+    near = [t for t in document.tables
+            if [c.text for c in t.rows[0].cells][0] == "Search"]
+    assert near, "no near miss table"
+    assert near[0].rows[1].cells[0].text == "coworking space pune"
+
+
+def test_the_search_findings_are_rows_with_wholes_and_actions(short_run):
+    from docx import Document
+
+    path = os.path.join(short_run, "findings.json")
+    with open(path, encoding="utf-8") as handle:
+        findings = json.load(handle)
+    findings["search_performance"] = search_block()
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(findings, handle)
+
+    generate_short(short_run)
+    document = Document(os.path.join(short_run, sorted(
+        f for f in os.listdir(short_run) if f.endswith(".docx"))[0]))
+
+    rows = []
+    for table in document.tables:
+        if [c.text for c in table.rows[0].cells] == \
+                ["Finding", "Count", "Severity", "Action"]:
+            rows += [[c.text for c in row.cells] for row in table.rows[1:]]
+    hidden = [row for row in rows
+              if row[0].startswith("Page hidden from search still")]
+    assert hidden, rows
+    assert hidden[0][1] == "2 of 35 pages that appeared in search"
+    assert hidden[0][3].endswith(".")

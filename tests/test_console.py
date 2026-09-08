@@ -9,6 +9,7 @@ here rather than in front of an operator.
 import json
 import os
 import sys
+import time
 
 import pytest
 
@@ -804,3 +805,170 @@ def test_clean_refuses_to_remove_a_host_without_yes(tmp_path, capsys):
     assert code == 1
     assert path.exists(), "runs went without --yes"
     assert "--yes" in output.err
+
+
+# --- session 12: stale runs, the key check, and attaching an export --------
+
+def test_a_run_that_stopped_a_day_ago_no_longer_blocks_the_console(tmp_path):
+    """One reboot must not lock the console out for good."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    stale = log_dir / "old.log"
+    stale.write_text("crawling\n", encoding="utf-8")
+    old = time.time() - 25 * 3600
+    os.utime(stale, (old, old))
+
+    assert runner.is_stale(str(stale))
+    assert runner.running_runs(str(log_dir)) == []
+    assert runner.stale_runs(str(log_dir)) == [str(stale)]
+
+
+def test_a_run_that_started_an_hour_ago_still_blocks(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    live = log_dir / "live.log"
+    live.write_text("crawling\n", encoding="utf-8")
+    recent = time.time() - 3600
+    os.utime(live, (recent, recent))
+
+    assert not runner.is_stale(str(live))
+    assert runner.running_runs(str(log_dir)) == [str(live)]
+    assert runner.stale_runs(str(log_dir)) == []
+
+
+def test_a_finished_log_is_never_stale(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    done = log_dir / "done.log"
+    done.write_text("EXIT_CODE=0\n", encoding="utf-8")
+    old = time.time() - 100 * 3600
+    os.utime(done, (old, old))
+    assert not runner.is_stale(str(done))
+    assert runner.stale_runs(str(log_dir)) == []
+
+
+def test_the_long_report_says_when_there_is_no_key(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "has_openai_key", lambda: False)
+    called = []
+    monkeypatch.setattr(runner.subprocess, "run",
+                        lambda *a, **k: called.append(a))
+
+    result = runner.generate_report(str(tmp_path), "long")
+    assert result["ok"] is False
+    assert result["message"] == runner.NO_KEY_MESSAGE
+    assert called == [], "the report command ran without a key"
+
+
+def test_the_short_report_needs_no_key(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "has_openai_key", lambda: False)
+
+    class Result:
+        returncode = 0
+        stdout = "written"
+        stderr = ""
+
+    monkeypatch.setattr(runner.subprocess, "run",
+                        lambda *a, **k: Result())
+    assert runner.generate_report(str(tmp_path), "short")["ok"]
+
+
+def test_attaching_an_export_deletes_the_upload_it_was_given(tmp_path,
+                                                             monkeypatch):
+    """The client's data is joined and dropped; only our answer is kept."""
+    seen = {}
+
+    class Result:
+        returncode = 0
+        stdout = "matched 10 of 10"
+        stderr = ""
+
+    def fake_run(command, capture_output=None, text=None, cwd=None):
+        seen["command"] = list(command)
+        seen["existed"] = os.path.exists(command[command.index("--export")
+                                                 + 1])
+        return Result()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    result = runner.attach_gsc(str(tmp_path), b"Top pages,Clicks\n",
+                               "export.csv")
+
+    assert result["ok"]
+    assert seen["command"][1:3] == ["-m", "seo_audit.gsc"]
+    assert seen["existed"], "the command was handed nothing to read"
+    temp_path = seen["command"][seen["command"].index("--export") + 1]
+    assert temp_path.endswith(".csv")
+    assert not os.path.exists(temp_path), "the upload was left on disk"
+
+
+def test_the_mode_of_a_run_is_read_from_its_findings(tmp_path):
+    run_dir = make_run_dir(tmp_path, files=("findings.json",))
+    with open(os.path.join(run_dir, "findings.json"), "w",
+              encoding="utf-8") as handle:
+        json.dump({"meta": {"mode": "full"}}, handle)
+    assert runner.run_mode(run_dir) == "full"
+
+    plain = make_run_dir(tmp_path, files=("findings.json",),
+                         name="20260102-000000")
+    assert runner.run_mode(plain) == "baseline"
+    assert runner.run_mode(str(tmp_path / "nowhere")) == "unknown"
+
+
+def test_the_results_page_offers_the_uploader_and_shows_the_section(
+        app_runner):
+    app = app_test().run()
+    app.sidebar.radio[0].set_value("Results").run()
+
+    assert not app.exception
+    assert any("Search performance" == header.value
+               for header in app.subheader)
+    labels = [element.label for element in app.get("file_uploader")]
+    assert any("Search Console" in label for label in labels)
+
+
+def test_the_report_page_says_which_mode_the_run_is_in(app_runner):
+    app = app_test().run()
+    app.sidebar.radio[0].set_value("Report").run()
+    captions = " ".join(caption.value for caption in app.caption)
+    assert "mode" in captions
+
+
+def test_the_results_page_renders_the_search_tables_once_attached(
+        app_runner, tmp_path):
+    """After an attach, the console shows the same tables the report does."""
+    from seo_audit import report
+
+    findings_path = os.path.join(app_runner.run_dir, "findings.json")
+    with open(findings_path, encoding="utf-8") as handle:
+        findings = json.load(handle)
+    findings["search_performance"] = {
+        "provided": True, "date_range": "2026-01-01 to 2026-06-30",
+        "coverage_note": "Read Pages.csv (pages).",
+        "totals": {"impressions": 5000, "clicks": 120,
+                   "pages_in_export": 20, "queries_in_export": 40},
+        "join": {"matched": {"count": 18, "whole": 20,
+                             "whole_is": "pages in the export"},
+                 "not_crawled": {"count": 2, "whole": 20,
+                                 "whole_is": "pages in the export"},
+                 "crawled_not_in_export": {"count": 4, "whole": 22,
+                                           "whole_is": "pages crawled"}},
+        "near_miss_queries": [{"query": "office space pune", "clicks": 3,
+                               "impressions": 900, "ctr_percent": 0.3,
+                               "position": 7.2}],
+        "cannibalised_queries": [], "cannibalisation_available": False,
+        "issue_counts": {"gsc_orphan_page_with_clicks": 2},
+        "wholes": {"pages_with_impressions": 18, "sitemap_pages": 20,
+                   "queries": 40},
+    }
+    with open(findings_path, "w", encoding="utf-8") as handle:
+        json.dump(findings, handle)
+
+    app = app_test().run()
+    app.sidebar.radio[0].set_value("Results").run()
+    assert not app.exception
+
+    frames = [frame.value.values.tolist() for frame in app.dataframe]
+    coverage = report.search_coverage_rows(findings["search_performance"])
+    assert coverage in frames, f"the join coverage table is missing: {coverage}"
+    issue_rows = report.search_issue_rows(findings["search_performance"])
+    assert issue_rows in frames, "the search findings table is missing"
+    assert any(metric.value == "5000" for metric in app.metric)

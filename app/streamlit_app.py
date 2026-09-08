@@ -251,6 +251,8 @@ def page_results():
                 "Note": item.get("note", ""),
             } for item in notable], use_container_width=True)
 
+    _search_performance(run, findings)
+
     st.subheader("Files")
     for name in runner.RUN_FILES:
         path = os.path.join(run["path"], name)
@@ -259,6 +261,58 @@ def page_results():
         with open(path, "rb") as handle:
             st.download_button(name, handle.read(), file_name=name,
                                key=f"dl_{name}")
+
+
+def _search_performance(run, findings):
+    """What search engines did with this site, once an export is attached."""
+    block = findings.get("search_performance") or {}
+    st.subheader("Search performance")
+
+    if block.get("provided"):
+        totals = block.get("totals") or {}
+        columns = st.columns(3)
+        columns[0].metric("Impressions", totals.get("impressions", 0))
+        columns[1].metric("Clicks", totals.get("clicks", 0))
+        columns[2].metric("Searches", totals.get("queries_in_export", 0))
+        st.caption(f"Covering {block.get('date_range')}. "
+                   f"{block.get('coverage_note', '')}")
+        st.dataframe([dict(zip(report.SEARCH_COVERAGE_COLUMNS, row))
+                      for row in report.search_coverage_rows(block)],
+                     use_container_width=True)
+        issue_rows = report.search_issue_rows(block)
+        if issue_rows:
+            st.dataframe([dict(zip(report.SHORT_SECTION_COLUMNS, row))
+                          for row in issue_rows], use_container_width=True)
+        near = report.near_miss_rows(block)
+        if near:
+            with st.expander(f"Searches the site nearly wins ({len(near)})"):
+                st.dataframe([dict(zip(report.NEAR_MISS_COLUMNS, row))
+                              for row in near], use_container_width=True)
+        cannibal = report.cannibalised_rows(block)
+        if cannibal:
+            with st.expander(f"Searches answered by more than one page "
+                             f"({len(cannibal)})"):
+                st.dataframe([dict(zip(report.CANNIBAL_COLUMNS, row))
+                              for row in cannibal],
+                             use_container_width=True)
+    else:
+        st.caption("No Search Console export attached to this run yet.")
+
+    upload = st.file_uploader(
+        "Attach Search Console export (zip or CSV)",
+        type=["zip", "csv"], key=f"gsc_{run['name']}",
+        help="The export is read, joined to this crawl and then deleted. "
+             "Only the audit's own join file is kept.")
+    if upload is not None and st.button("Attach export", key="attach_gsc"):
+        with st.spinner("Joining the export to the crawl..."):
+            result = runner.attach_gsc(run["path"], upload, upload.name)
+        if result["ok"]:
+            st.success("Attached. The tables above now include search data.")
+            st.code(result["output"][-1500:])
+            st.rerun()
+        else:
+            st.error("The join failed.")
+            st.code(result["output"][-1500:])
 
 
 # --- page 3: report ----------------------------------------------------------
@@ -278,12 +332,20 @@ def page_report():
                         "call. Long is the narrated version, for internal "
                         "use, and calls the model.")
     st.caption(COST_NOTE)
+    mode = runner.run_mode(run["path"])
+    st.caption(f"This run is in {mode} mode."
+               + ("" if mode == "full" else
+                  " Attach a Search Console export on the Results page to "
+                  "cover search performance."))
     if st.button(f"Generate {fmt} report"):
         with st.spinner("Building the document..."):
             result = runner.generate_report(run["path"], fmt)
         st.session_state["report"] = result
         if result["ok"]:
             st.success("Report written and validated.")
+        elif result.get("message"):
+            # A missing key is a setup question, not a crash.
+            st.warning(result["message"])
         else:
             st.error("The report command failed.")
             st.code(result["output"][-2000:])
@@ -324,7 +386,19 @@ def page_runs():
         "Host": host, "Run": item["name"], "When": item["when"],
         "Size (KB)": item["size_kb"], "Files": item["files"],
         "Finished": item["complete"], "Report": item["report"],
+        "Search data": item.get("search", False),
     } for host, items in runs.items() for item in items], use_container_width=True)
+
+    stale = runner.stale_runs()
+    if stale:
+        st.subheader("Stopped without finishing")
+        st.caption("These runs never wrote an exit code and have been quiet "
+                   "for over a day, so the machine they ran on is gone. They "
+                   "no longer block a new run.")
+        for log_path in stale:
+            with st.expander(os.path.basename(log_path)):
+                st.code(runner.poll(runner.run_dir_of(log_path),
+                                    log_path)["tail"] or "(empty log)")
 
     st.subheader("Delete")
     st.caption("The newest run of a host is kept by both delete buttons. "

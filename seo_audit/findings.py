@@ -814,10 +814,31 @@ def _fix_scope(issue_type: str, rows: List[Dict]) -> str:
     return "page"
 
 
+# What each search performance finding is counted out of. A page that
+# appeared in search is not one of "all pages parsed", and a search is not a
+# page at all, so none of them borrow the page total.
+GSC_WHOLES = {
+    "gsc_impressions_on_noindex": ("pages_with_impressions",
+                                   "pages that appeared in search"),
+    "gsc_impressions_on_off_canonical": ("pages_with_impressions",
+                                         "pages that appeared in search"),
+    "gsc_sitemap_page_no_impressions": ("sitemap_pages",
+                                        "pages listed in the sitemap"),
+    "gsc_orphan_page_with_clicks": ("pages_with_impressions",
+                                    "pages that appeared in search"),
+    "gsc_query_cannibalised": ("queries", "searches in the export"),
+}
+
+
 def _affected_share(candidate: Dict, pages_affected: int, parsed: int,
                     totals: Dict[str, int]) -> Dict:
     """How many pages a fix touches. For target types that is the pages that
     link to the broken thing, not the number of broken things."""
+    gsc = GSC_WHOLES.get(candidate["issue_type"])
+    if gsc:
+        key, whole_is = gsc
+        whole = totals.get(key) or pages_affected
+        return share(min(pages_affected, whole), whole, whole_is)
     if unit_of(candidate["issue_type"]) == "target":
         # A detail line names at most five referrers, so counting named ones
         # undercounts. The largest single target's referrer count is a lower
@@ -1009,6 +1030,37 @@ def _metric_values(summary: Dict, issues: List[Dict]) -> Dict[str, Any]:
     }
 
 
+def _search_comparison(run_dir: str, previous_dir: str) -> Dict:
+    """Impressions and clicks either side, when both runs have an export.
+
+    Half an answer is worse than none here: without the previous run's
+    export there is nothing to compare, and the block says so rather than
+    presenting this run's totals as a movement.
+    """
+    now = _existing_search_performance(run_dir)
+    before = _existing_search_performance(previous_dir)
+    if not now.get("provided"):
+        return {"available": False, "note": "no export attached to this run"}
+    if not before.get("provided"):
+        return {"available": False, "now": now.get("totals", {}),
+                "note": "not in previous run"}
+
+    out = {"available": True, "note": "",
+           "date_range_now": now.get("date_range"),
+           "date_range_previous": before.get("date_range")}
+    for metric in ("impressions", "clicks"):
+        was = (before.get("totals") or {}).get(metric)
+        is_now = (now.get("totals") or {}).get(metric)
+        out[metric] = {"previous": was, "now": is_now,
+                       "change": (is_now - was)
+                       if isinstance(was, (int, float))
+                       and isinstance(is_now, (int, float)) else None}
+    if out["date_range_now"] != out["date_range_previous"]:
+        out["note"] = ("the two exports cover different periods, so the "
+                       "totals are not comparable")
+    return out
+
+
 def compare(run_dir: str, previous_dir: Optional[str] = None) -> Dict:
     """Compare a run against a previous one, tolerating a drifted summary.
 
@@ -1105,6 +1157,7 @@ def compare(run_dir: str, previous_dir: Optional[str] = None) -> Dict:
     return {
         "previous_run": os.path.basename(os.path.normpath(previous_dir)),
         "previous_run_path": previous_dir,
+        "search_performance": _search_comparison(run_dir, previous_dir),
         "coverage_changed": coverage_changed,
         "sitemap_changed": bool(sitemap_changed),
         "issue_counts_comparable": not coverage_changed,
@@ -1118,6 +1171,19 @@ def compare(run_dir: str, previous_dir: Optional[str] = None) -> Dict:
 
 
 # --- the whole thing --------------------------------------------------------
+
+def _existing_search_performance(run_dir: str) -> Dict:
+    """The search performance block already on disk, if a run has one."""
+    path = os.path.join(run_dir, "findings.json")
+    if not os.path.exists(path):
+        return {"provided": False}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            block = (json.load(handle) or {}).get("search_performance") or {}
+    except (ValueError, OSError):
+        return {"provided": False}
+    return block if block.get("provided") else {"provided": False}
+
 
 def build_findings(run_dir: str, previous_dir: Optional[str] = None,
                    compare_enabled: bool = True,
@@ -1138,6 +1204,13 @@ def build_findings(run_dir: str, previous_dir: Optional[str] = None,
     for row in page_issues:
         issues_by_type[row["issue_type"]].append(row)
 
+    # A Search Console export is attached after the crawl, by its own
+    # command. Rebuilding the findings must carry that answer forward rather
+    # than quietly throwing it away.
+    search_performance = _existing_search_performance(run_dir)
+    gsc_wholes = (search_performance.get("wholes") or {}) \
+        if search_performance.get("provided") else {}
+
     findings = {
         "meta": _meta(summary, run_dir),
         "headline": _headline(summary),
@@ -1156,11 +1229,16 @@ def build_findings(run_dir: str, previous_dir: Optional[str] = None,
                                          default=0),
                 # Addresses crawled, not link edges: see _targets_share.
                 "internal_targets": _dig(summary, "pages_found", default=0),
+                **gsc_wholes,
             }),
-        "search_performance": {"provided": False},
+        "search_performance": search_performance,
         "comparison": (compare(run_dir, previous_dir) if compare_enabled
                        else {"previous_run": None}),
     }
+
+    if search_performance.get("provided"):
+        # The mode is what this run can answer, and it can answer more now.
+        findings["meta"]["mode"] = "full"
 
     if write:
         path = os.path.join(run_dir, "findings.json")
