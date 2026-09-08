@@ -1,5 +1,12 @@
 """The deliverable: a validated Word document built from a finished run.
 
+Two formats. The short one is what a client receives and is the default: a
+score, a fixes table with an action on every row, one table per section, two
+charts, and no prose beyond a sentence above each table. It is built entirely
+from findings.json, so it calls no model and costs nothing. The long one,
+kept for internal use behind --format long, is the narrated report the model
+helps write.
+
 Numbers come from code, prose comes from the model, and the document is
 reopened and checked before this command will exit zero. A file that opens is
 not a file that is right, so validation is part of producing it rather than
@@ -495,6 +502,484 @@ def build_document(findings: Dict, narrator: Narrator, charts: Dict,
     return document
 
 
+# --- the short report: tables, not prose ------------------------------------
+#
+# Management's rule for what a client receives: short, and not obviously
+# written by a machine. So nothing here is written by a machine that writes
+# sentences. Every line is built from findings.json, and every finding
+# arrives as a row with its count, its whole, its severity and the one thing
+# to do about it. No model is called, so a short report costs nothing.
+
+SHORT_MAX_WORDS = 2500
+SHORT_IMAGES = 2
+SHORT_SECTION_COLUMNS = ["Finding", "Count", "Severity", "Action"]
+FIXES_COLUMNS = ["Rank", "Fix", "Pages affected", "Severity", "Scope",
+                 "Action"]
+IN_PLACE = "In place"
+SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2, "unmeasured": 3, "info": 4}
+
+
+# findings.json names its wholes for the tool. These are the same wholes in
+# the words the rest of the report uses.
+WHOLE_WORDS = {
+    "pages found": "addresses crawled",
+    "sitemap URLs": "sitemap addresses",
+    "external targets found": "links to other websites found",
+    "external targets checked": "links to other websites checked",
+    "internal addresses crawled": "addresses crawled",
+    "canonical check limit": "addresses checked",
+}
+
+
+def _plain_count(count: int, whole: int, whole_is: str) -> str:
+    return f"{count} of {whole} {WHOLE_WORDS.get(whole_is, whole_is)}".strip()
+
+
+def _count_cell(issue_type: str, count: int, whole: int, whole_is: str,
+                parsed: int, crawled: int) -> str:
+    """A count that says what it is out of, whatever it counts.
+
+    A group of pages is not a page and a broken address is not a page, so
+    each unit gets its own whole rather than borrowing the page total.
+    """
+    unit = unit_of(issue_type)
+    if unit == "site":
+        return "the whole site"
+    if whole:
+        return _plain_count(count, whole, whole_is)
+    if unit == "group":
+        return f"{count} groups of {parsed} pages parsed"
+    if unit == "target":
+        return _plain_count(count, crawled, "addresses crawled")
+    return _plain_count(count, parsed, "pages parsed")
+
+
+def _section_table(section_name: str, section: Any, parsed: int,
+                   crawled: int) -> Tuple[List[List[str]], List[str]]:
+    """(rows, what is already in place) for one findings section."""
+    from .issues import PAGE_ISSUE_ACTION, PAGE_ISSUE_SEVERITY
+    from .narrative import FACT_PATHS, fact_entries
+
+    entries = fact_entries(section_name, section, parsed)
+    found: List[Tuple[int, int, List[str]]] = []
+    in_place: List[str] = []
+    named = set()
+    for issue_type, count, whole, whole_is in entries:
+        named.add(issue_type)
+        severity = PAGE_ISSUE_SEVERITY.get(issue_type, "low")
+        cell = _count_cell(issue_type, count, whole, whole_is, parsed,
+                           crawled)
+        if severity == "info":
+            in_place.append(f"{label_of(issue_type)}, {cell}")
+            continue
+        found.append((SEVERITY_RANK.get(severity, 2), -count,
+                      [label_of(issue_type).capitalize(), cell, severity,
+                       PAGE_ISSUE_ACTION.get(issue_type, "")]))
+
+    if section_name == "content":
+        handled = sum((section.get(key) or {}).get("canonical_handled", 0)
+                      for key in ("duplicate_content",
+                                  "near_duplicate_content"))
+        if handled:
+            in_place.append(f"{handled} groups of pages with the same text "
+                            f"already name one of themselves as the "
+                            f"preferred address")
+
+    # What the section checked and did not find. A client reads this as the
+    # part of their site that is already right, which is why it is here.
+    clean = [label_of(issue_type)
+             for issue_type, _path in FACT_PATHS.get(section_name, ())
+             if issue_type not in named]
+    if clean:
+        in_place.append("nothing found for " + ", ".join(clean[:4]))
+
+    found.sort(key=lambda item: (item[0], item[1]))
+    return [row for _rank, _count, row in found], in_place
+
+
+def _in_place_row(in_place: List[str]) -> List[str]:
+    text = "; ".join(in_place) if in_place else "nothing to note"
+    return [IN_PLACE, "", "", text[0].upper() + text[1:] + "."]
+
+
+# Crawlability counts obstacles rather than page faults, so its rows are
+# written here: what was in the way, how many of what, and what to do.
+def _crawlability_table(section: Dict, coverage: Dict
+                        ) -> Tuple[List[List[str]], List[str]]:
+    sitemap = section.get("sitemap") or {}
+    redirects = section.get("redirects") or {}
+    robots = section.get("robots") or {}
+    crawled = coverage.get("pages_found", 0)
+    listed = sitemap.get("urls_total", 0)
+    redirected = (redirects.get("total") or {}).get("count", 0)
+
+    def share(obj) -> Tuple[int, str]:
+        obj = obj or {}
+        return (obj.get("count", 0),
+                _plain_count(obj.get("count", 0), obj.get("whole", 0),
+                             obj.get("whole_is", "")))
+
+    rows: List[Tuple[int, int, List[str]]] = []
+
+    def add(count: int, cell: str, finding: str, severity: str, action: str):
+        if count:
+            rows.append((SEVERITY_RANK.get(severity, 2), -count,
+                         [finding, cell, severity, action]))
+
+    count, cell = share(sitemap.get("in_sitemap_not_crawled"))
+    add(count, cell, "Sitemap addresses the crawl never reached", "medium",
+        "Link these addresses from the site, or take them out of the "
+        "sitemap.")
+    count, cell = share(sitemap.get("crawled_not_in_sitemap"))
+    add(count, cell, "Addresses found by following links but not in the "
+        "sitemap", "medium", "Add these addresses to the sitemap.")
+    add(sitemap.get("non_200", 0),
+        _plain_count(sitemap.get("non_200", 0), listed, "sitemap addresses"),
+        "Sitemap entries that do not load", "high",
+        "Repair these pages or take them out of the sitemap.")
+
+    count, cell = share(redirects.get("total"))
+    add(count, cell, "Addresses that answer with a redirect", "low",
+        "Point internal links at the address the redirect ends on.")
+    count, cell = share(redirects.get("trailing_slash"))
+    add(count, cell, "Redirects that only add a slash at the end", "low",
+        "Write internal links with the slash at the end so they land "
+        "directly.")
+    add(redirects.get("chains", 0),
+        _plain_count(redirects.get("chains", 0), redirected, "redirects"),
+        "Redirects that pass through another redirect", "low",
+        "Point these addresses straight at the final page.")
+    add(redirects.get("loops", 0),
+        _plain_count(redirects.get("loops", 0), redirected, "redirects"),
+        "Redirect loops", "high",
+        "Repair these addresses so they arrive at a page.")
+
+    add(robots.get("blocked_linked", 0),
+        _plain_count(robots.get("blocked_linked", 0), crawled,
+                     "addresses crawled"),
+        "Linked addresses the robots file blocks", "high",
+        "Allow these addresses in the robots file, or stop linking to them.")
+    add(robots.get("blocked_in_sitemap", 0),
+        _plain_count(robots.get("blocked_in_sitemap", 0), listed,
+                     "sitemap addresses"),
+        "Sitemap addresses the robots file blocks", "high",
+        "Allow these addresses in the robots file, or take them out of the "
+        "sitemap.")
+
+    count, cell = share(section.get("deep_pages"))
+    add(count, cell, "Pages more than three clicks from the home page", "low",
+        "Link these pages from a navigation or category page.")
+    count, cell = share(section.get("render_suspects"))
+    add(count, cell, "Pages with almost no text until scripts run", "medium",
+        "Serve the main text of these pages in the page itself.")
+    add(section.get("slow_responses", 0),
+        _plain_count(section.get("slow_responses", 0), crawled,
+                     "addresses crawled"),
+        "Addresses slow to answer", "medium",
+        "Ask the developers what makes these addresses slow.")
+    add(section.get("fetch_errors", 0),
+        _plain_count(section.get("fetch_errors", 0), crawled,
+                     "addresses crawled"),
+        "Addresses that returned nothing", "high",
+        "Repair or remove these addresses.")
+    add(section.get("documents_linked", 0),
+        _plain_count(section.get("documents_linked", 0), crawled,
+                     "addresses crawled"),
+        "Links to documents rather than pages", "low",
+        "Link to a page describing the document where one would serve "
+        "better.")
+    add(section.get("non_html_linked", 0),
+        _plain_count(section.get("non_html_linked", 0), crawled,
+                     "addresses crawled"),
+        "Links to files that are neither pages nor documents", "low",
+        "Point these links at a page, or remove them.")
+
+    in_place = []
+    if robots.get("found"):
+        in_place.append("a robots file is in place")
+    if listed:
+        in_place.append(f"a sitemap is in place, listing {listed} addresses")
+    if not section.get("fetch_errors"):
+        in_place.append("every address the crawl asked for answered")
+
+    rows.sort(key=lambda item: (item[0], item[1]))
+    return [row for _rank, _count, row in rows], in_place
+
+
+def _performance_table(section: Dict) -> Tuple[List[List[str]], List[str]]:
+    """Speed is measured per template, so the rows count templates."""
+    from .issues import PAGE_ISSUE_ACTION, PAGE_ISSUE_SEVERITY
+    from .pagespeed import POOR_CLS, POOR_LCP_MS, POOR_PERFORMANCE_SCORE
+
+    measured = section.get("templates_measured") or []
+    total = len(measured)
+    if not total:
+        return [], ["speed was not measured for this audit"]
+
+    def count_where(test) -> int:
+        return sum(1 for m in measured if test(m))
+
+    slow = count_where(lambda m: m.get("mobile_score") is not None
+                       and m["mobile_score"] < POOR_PERFORMANCE_SCORE)
+    late = count_where(lambda m: (m.get("lab_lcp_ms") or 0) > POOR_LCP_MS)
+    shifty = count_where(lambda m: (m.get("lab_cls") or 0) > POOR_CLS)
+
+    rows = []
+    for count, issue_type, finding in (
+            (slow, "performance_poor",
+             "Templates that score poorly on a phone"),
+            (late, "lcp_poor",
+             "Templates whose main content takes a long time to appear"),
+            (shifty, "cls_poor",
+             "Templates that move about while they load")):
+        if count:
+            rows.append([finding,
+                         f"{count} of {total} measured templates",
+                         PAGE_ISSUE_SEVERITY.get(issue_type, "medium"),
+                         PAGE_ISSUE_ACTION.get(issue_type, "")])
+
+    healthy = total - slow
+    in_place = []
+    if healthy:
+        in_place.append(f"{healthy} of {total} measured templates score 50 "
+                        f"or better on a phone")
+    return rows, in_place
+
+
+def _short_lead(section_name: str, section: Any, rows: List[List[str]],
+                coverage: Dict) -> str:
+    """One sentence above each table, carrying the number that matters most."""
+    if section_name == "performance":
+        measured = section.get("templates_measured") or []
+        represented = section.get("pages_represented") or {}
+        if not measured:
+            return "Speed was not measured for this audit."
+        return (f"Speed was measured on {len(measured)} page templates "
+                f"covering {represented.get('count', 0)} of "
+                f"{represented.get('whole', 0)} pages read, averaging "
+                f"{section.get('mean_mobile_score')} of 100 on a phone and "
+                f"{section.get('mean_desktop_score')} of 100 on a desktop.")
+    if section_name == "crawlability":
+        sitemap = (section or {}).get("sitemap") or {}
+        return (f"The crawl reached {coverage.get('pages_found', 0)} "
+                f"addresses and the sitemap lists "
+                f"{sitemap.get('urls_total', 0)}.")
+    if not rows:
+        return "Nothing to fix in this section."
+    first = rows[0][0]
+    return (f"{len(rows)} findings here, the most serious first: "
+            f"{first[0].lower() + first[1:]}, {rows[0][1]}.")
+
+
+def _short_fixes_rows(fixes: List[Dict]) -> List[List[str]]:
+    from .issues import PAGE_ISSUE_ACTION
+
+    rows = []
+    for rank, fix in enumerate(fixes[:TOP_FIXES], start=1):
+        affected = fix.get("pages_affected") or {}
+        scale = _plain_count(affected.get("count", 0),
+                             affected.get("whole", 0),
+                             affected.get("whole_is", "pages"))
+        targets = fix.get("targets")
+        if targets:
+            scale += (f" ({targets['count']} of {targets['whole']} "
+                      f"{targets['whole_is']})")
+        label = fix.get("label") or fix.get("title", "")
+        rows.append([
+            str(rank),
+            label[0].upper() + label[1:] if label else "",
+            scale,
+            fix.get("severity", ""),
+            SCOPE_WORDS.get(fix.get("fix_scope", ""), fix.get("fix_scope", "")),
+            PAGE_ISSUE_ACTION.get(fix.get("issue_type", ""), ""),
+        ])
+    return rows
+
+
+def build_short_charts(findings: Dict) -> Dict[str, Any]:
+    """Two charts: how the pages score, and how the templates perform."""
+    charts: Dict[str, Any] = {}
+    headline = findings.get("headline") or {}
+    distribution = headline.get("distribution") or {}
+    scored = headline.get("pages_scored", 0)
+    if distribution and scored:
+        title = pie_title("Page scores", scored, "pages scored")
+        charts["headline"] = (
+            _pie([(band.replace("-", " to "), obj["count"])
+                  for band, obj in distribution.items()], title), title)
+
+    measured = ((findings.get("performance") or {})
+                .get("templates_measured") or [])
+    rows = [(m.get("template_words") or m["template"], m["mobile_score"])
+            for m in measured if m.get("mobile_score") is not None]
+    if rows:
+        title = "Mobile speed score by template, out of 100"
+        charts["performance_bar"] = (
+            _barh(rows, title, "Score out of 100"), title)
+    return {key: value for key, value in charts.items() if value[0] is not None}
+
+
+def _short_cover(document, findings: Dict, host: str) -> None:
+    meta = findings.get("meta") or {}
+    coverage = meta.get("coverage") or {}
+    caps = meta.get("caps_applied") or {}
+    templates = (findings.get("performance") or {}).get("templates_sampled", 0)
+
+    document.add_heading(f"SEO Audit: {host}", level=0)
+    document.add_paragraph(strip_dashes(
+        f"Prepared {date.today().isoformat()}. Mode: "
+        f"{meta.get('mode', 'baseline')}."))
+    document.add_paragraph(strip_dashes(
+        f"The crawl reached {coverage.get('pages_found', 0)} addresses on "
+        f"{host} and read {coverage.get('pages_parsed', 0)} of them as "
+        f"pages. The sitemap lists {coverage.get('sitemap_urls_total', 0)} "
+        f"addresses."))
+    document.add_paragraph(strip_dashes(
+        f"Limits: at most {caps.get('max_pages')} pages, "
+        f"{caps.get('max_depth')} clicks from the home page, "
+        f"{caps.get('external_check_limit')} links to other websites "
+        f"checked, and speed measured on {templates} page templates."))
+    document.add_paragraph(strip_dashes(
+        "Every count below says what it is a share of."))
+
+
+def _short_score(document, findings: Dict, charts: Dict) -> None:
+    headline = findings.get("headline") or {}
+    deduction = headline.get("site_level_deduction") or 0
+    excluded = (headline.get("noindex_excluded") or {}).get("count", 0)
+
+    document.add_heading("Score", level=1)
+    sentence = (f"The site scores {headline.get('site_score')} out of 100 "
+                f"across {headline.get('pages_scored', 0)} pages scored")
+    if deduction:
+        sentence += (f", after a deduction of {deduction} points for "
+                     f"settings that apply to the whole site")
+    if excluded:
+        sentence += (f", with {excluded} pages left out because they are "
+                     f"hidden from search")
+    document.add_paragraph(strip_dashes(sentence + "."))
+    if "headline" in charts:
+        _add_chart(document, charts["headline"])
+
+
+def build_short_document(findings: Dict, charts: Dict, host: str) -> Any:
+    """The whole client deliverable, built from findings.json alone."""
+    from docx import Document
+
+    document = Document()
+    coverage = (findings.get("meta") or {}).get("coverage") or {}
+    parsed = coverage.get("pages_parsed", 0)
+    crawled = coverage.get("pages_found", 0)
+
+    _short_cover(document, findings, host)
+    _short_score(document, findings, charts)
+
+    document.add_heading("Priority fixes", level=1)
+    fixes = findings.get("prioritised_fixes") or []
+    if fixes:
+        document.add_paragraph(strip_dashes(
+            f"The {min(len(fixes), TOP_FIXES)} fixes worth doing first, "
+            f"ordered by how much of the site they affect and how serious "
+            f"they are."))
+        _add_table(document, FIXES_COLUMNS, _short_fixes_rows(fixes))
+    else:
+        document.add_paragraph("No fixes were raised by this audit.")
+
+    for key, heading in SECTIONS:
+        section = findings.get(key)
+        if section is None:
+            continue
+        if key == "crawlability":
+            rows, in_place = _crawlability_table(section, coverage)
+        elif key == "performance":
+            rows, in_place = _performance_table(section)
+        else:
+            rows, in_place = _section_table(key, section, parsed, crawled)
+
+        document.add_heading(heading, level=1)
+        document.add_paragraph(strip_dashes(
+            _short_lead(key, section, rows, coverage)))
+        _add_table(document, SHORT_SECTION_COLUMNS,
+                   rows + [_in_place_row(in_place)])
+
+        if key == "performance":
+            measured = (section or {}).get("templates_measured") or []
+            if measured:
+                _add_table(document,
+                           ["Template", "Shape for developers", "Pages",
+                            "Mobile", "Desktop"],
+                           [[m.get("template_words") or m["template"],
+                             m["template"], m["group_size"],
+                             m["mobile_score"], m["desktop_score"]]
+                            for m in measured[:APPENDIX_ROWS]])
+            if "performance_bar" in charts:
+                _add_chart(document, charts["performance_bar"])
+
+    comparison = findings.get("comparison") or {}
+    if comparison.get("previous_run"):
+        document.add_heading("Comparison with the previous audit", level=1)
+        _short_comparison(document, comparison)
+
+    document.add_heading("Search performance", level=1)
+    document.add_paragraph(strip_dashes(
+        "Search Console data was not supplied, so this report does not cover "
+        "what people searched for or how often the site was clicked."))
+
+    document.add_heading("Appendix", level=1)
+    links = findings.get("links") or {}
+    broken = (links.get("broken_internal") or {}).get("groups") or []
+    if broken:
+        document.add_heading("Broken internal link groups", level=2)
+        _add_table(document,
+                   ["Where they are", "Addresses", "Links pointing there"],
+                   [[template_words(g["pattern"]), g["targets"],
+                     g["link_instances"]]
+                    for g in broken[:APPENDIX_ROWS]])
+    lowest = (findings.get("headline") or {}).get("lowest_pages") or []
+    if lowest:
+        document.add_heading("Lowest scoring pages", level=2)
+        _add_table(document, ["Page", "Score", "Main issue"],
+                   [[p["final_url"], p["score"],
+                     label_of(p["top_issue"]) if p.get("top_issue") else ""]
+                    for p in lowest[:10]])
+    return document
+
+
+def _short_comparison(document, comparison: Dict) -> None:
+    """The same attribution the long report makes, in two sentences."""
+    sitemap = (comparison.get("deltas") or {}).get("sitemap_urls_total") or {}
+    if comparison.get("coverage_changed"):
+        if comparison.get("sitemap_changed"):
+            document.add_paragraph(strip_dashes(
+                f"The site's own sitemap changed between the two audits, "
+                f"from {sitemap.get('previous')} addresses to "
+                f"{sitemap.get('now')}. That is a change on the site, not in "
+                f"how it was audited."))
+        document.add_paragraph(strip_dashes(
+            "The two audits saw different amounts of the site, so the counts "
+            "below are not comparable."))
+    else:
+        document.add_paragraph(strip_dashes(
+            "Both audits saw the same amount of the site, so the counts "
+            "below are comparable."))
+    notable = comparison.get("notable") or []
+    if notable:
+        _add_table(document, ["Measure", "Previous", "Now", "Change", "Note"],
+                   [[_metric_label(n["metric"]), n["previous"], n["now"],
+                     n["change"], n.get("note", "")]
+                    for n in notable[:APPENDIX_ROWS]])
+
+
+def expected_headings_for_short(findings: Dict) -> List[str]:
+    headings = ["Score", "Priority fixes"]
+    headings += [title for key, title in SECTIONS
+                 if findings.get(key) is not None]
+    if (findings.get("comparison") or {}).get("previous_run"):
+        headings.append("Comparison with the previous audit")
+    headings += ["Search performance", "Appendix"]
+    return headings
+
+
 # --- validation -------------------------------------------------------------
 
 class ValidationError(RuntimeError):
@@ -537,6 +1022,13 @@ def _sections_missing_parts(document) -> List[str]:
 SHAPE_COLUMN = ("Template", "Shape")
 
 
+def _shape_column(header: List[str]) -> Optional[int]:
+    """The one column allowed to name a template the way the tool does."""
+    if header[:1] != [SHAPE_COLUMN[0]] or len(header) < 2:
+        return None
+    return 1 if header[1].startswith(SHAPE_COLUMN[1]) else None
+
+
 def _client_texts(document) -> List[str]:
     """Everything a client reads, minus the appendix shape column.
 
@@ -547,7 +1039,7 @@ def _client_texts(document) -> List[str]:
     texts = [p.text for p in document.paragraphs]
     for table in document.tables:
         header = [c.text.strip() for c in table.rows[0].cells]
-        exempt = (header[:2] == list(SHAPE_COLUMN)) and 1 or None
+        exempt = _shape_column(header)
         for index, row in enumerate(table.rows):
             for column, cell in enumerate(row.cells):
                 if exempt is not None and index and column == exempt:
@@ -556,13 +1048,10 @@ def _client_texts(document) -> List[str]:
     return texts
 
 
-def validate(path: str, expected_headings: List[str],
-             expected_images: int) -> List[str]:
-    """Reopen the file and check it. Raises with the failing check named."""
-    from docx import Document
-
+def _document_checks(document, path: str, expected_headings: List[str],
+                     expected_images: int) -> List[str]:
+    """The checks every format gets: order, images, dashes, shapes, size."""
     problems: List[str] = []
-    document = Document(path)
 
     headings = [p.text.strip() for p in document.paragraphs
                 if p.style.name.startswith("Heading") or p.style.name == "Title"]
@@ -601,6 +1090,21 @@ def validate(path: str, expected_headings: List[str],
         if "{" in text or "(depth" in text:
             problems.append(f"template shape in client text: {text[:70]!r}")
             break
+
+    if os.path.getsize(path) > MAX_DOC_BYTES:
+        problems.append(f"file is {os.path.getsize(path)} bytes, over the "
+                        f"{MAX_DOC_BYTES} limit")
+    return problems
+
+
+def validate(path: str, expected_headings: List[str],
+             expected_images: int) -> List[str]:
+    """The long format: the shared checks plus its own narrative ones."""
+    from docx import Document
+
+    document = Document(path)
+    problems = _document_checks(document, path, expected_headings,
+                                expected_images)
 
     # Every heading must be followed by something before the next heading.
     body = [(p.text.strip(),
@@ -643,11 +1147,83 @@ def validate(path: str, expected_headings: List[str],
     missing_parts = _sections_missing_parts(document)
     for heading in missing_parts:
         problems.append(f"section {heading!r} is missing a part")
-
-    if os.path.getsize(path) > MAX_DOC_BYTES:
-        problems.append(f"file is {os.path.getsize(path)} bytes, over the "
-                        f"{MAX_DOC_BYTES} limit")
     return problems
+
+
+# --- validating the short report --------------------------------------------
+
+# A count that states its whole: "3 of 842 pages parsed", "44 groups of 842
+# pages parsed", "43.8 of 100 on a phone". The one allowed cell without two
+# numbers is a setting that applies everywhere, which states its whole in
+# words.
+_STATES_A_WHOLE = re.compile(r"\d[\d,]*(?:\.\d+)?\s+(?:[a-z ]+\s+)?of\s+\d")
+WHOLE_IN_WORDS = ("the whole site",)
+_SENTENCE_END = re.compile(r"[.!?](?:\s|$)")
+
+
+def _count_columns(table) -> List[int]:
+    """The columns of this table that must state a whole, if any."""
+    header = [c.text.strip() for c in table.rows[0].cells]
+    return [index for index, name in enumerate(header)
+            if name in ("Count", "Pages affected")]
+
+
+def validate_short(path: str, expected_headings: List[str],
+                   expected_images: int = SHORT_IMAGES) -> List[str]:
+    """The shared checks, plus the ones that keep the short report short."""
+    from docx import Document
+
+    document = Document(path)
+    problems = _document_checks(document, path, expected_headings,
+                               expected_images)
+
+    words = sum(len(p.text.split()) for p in document.paragraphs)
+    if words > SHORT_MAX_WORDS:
+        problems.append(f"{words} words outside tables, over the "
+                        f"{SHORT_MAX_WORDS} limit")
+
+    for table in document.tables:
+        for column in _count_columns(table):
+            for row in table.rows[1:]:
+                cell = row.cells[column].text.strip()
+                if row.cells[0].text.strip() == IN_PLACE:
+                    continue
+                if not cell:
+                    problems.append(f"a count cell is empty in row "
+                                    f"{row.cells[0].text[:40]!r}")
+                    break
+                if (not _STATES_A_WHOLE.search(cell)
+                        and cell.lower() not in WHOLE_IN_WORDS):
+                    problems.append(f"count states no whole: {cell[:70]!r}")
+                    break
+
+    for table in document.tables:
+        header = [c.text.strip() for c in table.rows[0].cells]
+        if header != FIXES_COLUMNS:
+            continue
+        for row in table.rows[1:]:
+            if not row.cells[-1].text.strip():
+                problems.append(f"fix has no action: "
+                                f"{row.cells[1].text[:50]!r}")
+                break
+
+    # Prose is one lead sentence per section. The cover block is the one
+    # place that runs longer, so the rule starts after it.
+    started = False
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        if paragraph.style.name.startswith("Heading") or \
+                paragraph.style.name == "Title":
+            if text == "Score":
+                started = True
+            continue
+        if not started or not text:
+            continue
+        if len(_SENTENCE_END.findall(text)) > 2:
+            problems.append(f"paragraph runs to prose: {text[:70]!r}")
+            break
+    return problems
+
 
 
 def expected_headings_for(findings: Dict) -> List[str]:
@@ -662,15 +1238,52 @@ def expected_headings_for(findings: Dict) -> List[str]:
 
 # --- the command ------------------------------------------------------------
 
-def generate(run_dir: str, model: str = "gpt-5-mini", use_ai: bool = True,
-             session=None) -> Dict:
-    """Build, write and validate the report for one finished run folder."""
+def _load_findings(run_dir: str) -> Dict:
     findings_path = os.path.join(run_dir, "findings.json")
     if not os.path.exists(findings_path):
         raise FileNotFoundError(
             f"no findings.json in {run_dir}; run the audit first")
     with open(findings_path, encoding="utf-8") as handle:
-        findings = json.load(handle)
+        return json.load(handle)
+
+
+def generate_short(run_dir: str) -> Dict:
+    """The client deliverable: no model, no cost, one validated file."""
+    findings = _load_findings(run_dir)
+    host = (findings.get("meta") or {}).get("host") or "site"
+
+    charts = build_short_charts(findings)
+    document = build_short_document(findings, charts, host)
+    name = f"SEO_Audit_{host}_{date.today().isoformat()}.docx"
+    path = os.path.join(run_dir, name)
+    document.save(path)
+
+    problems = validate_short(path, expected_headings_for_short(findings),
+                              len(charts))
+    if problems:
+        raise ValidationError("; ".join(problems))
+    return {"docx": path, "usage": None, "charts": len(charts),
+            "format": "short", "usage_data": {"calls": 0, "model": "none",
+                                              "input_tokens": 0,
+                                              "output_tokens": 0,
+                                              "max_calls": 0,
+                                              "guard_events": []}}
+
+
+def build_report(run_dir: str, fmt: str = "short", model: str = "gpt-5-mini",
+                 use_ai: bool = True, session=None) -> Dict:
+    """One entry point for both formats. Short unless asked otherwise."""
+    if fmt == "short":
+        return generate_short(run_dir)
+    result = generate(run_dir, model=model, use_ai=use_ai, session=session)
+    result["format"] = "long"
+    return result
+
+
+def generate(run_dir: str, model: str = "gpt-5-mini", use_ai: bool = True,
+             session=None) -> Dict:
+    """Build, write and validate the long report for one run folder."""
+    findings = _load_findings(run_dir)
 
     host = (findings.get("meta") or {}).get("host") or "site"
     charts = build_charts(findings)
@@ -707,8 +1320,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Model for the narrative (default gpt-5-mini). "
                              "At most 14 calls per report.")
     parser.add_argument("--no-ai", action="store_true",
-                        help="Write the narrative from templates instead of "
-                             "calling the model. No API calls, no cost.")
+                        help="Long format only: write the narrative from "
+                             "templates instead of calling the model.")
+    parser.add_argument("--format", default="short", choices=("short", "long"),
+                        dest="fmt",
+                        help="short (default): the client deliverable, "
+                             "tables and actions, no model calls. long: the "
+                             "narrated report, for internal use.")
     return parser
 
 
@@ -719,15 +1337,21 @@ def main(argv=None) -> int:
     load_dotenv()
 
     try:
-        result = generate(args.run, model=args.model, use_ai=not args.no_ai)
+        result = build_report(args.run, fmt=args.fmt, model=args.model,
+                              use_ai=not args.no_ai)
     except Exception as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
     usage = result["usage_data"]
     print(f"report   : {result['docx']}", file=sys.stderr)
-    print(f"usage    : {result['usage']}", file=sys.stderr)
+    print(f"format   : {result['format']}", file=sys.stderr)
     print(f"charts   : {result['charts']}", file=sys.stderr)
+    if result["format"] == "short":
+        print("calls    : 0 (built from findings.json, no model)",
+              file=sys.stderr)
+        return 0
+    print(f"usage    : {result['usage']}", file=sys.stderr)
     print(f"calls    : {usage['calls']} of {usage['max_calls']} "
           f"({usage['model']})", file=sys.stderr)
     print(f"tokens   : {usage['input_tokens']} in, "

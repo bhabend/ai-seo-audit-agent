@@ -330,6 +330,128 @@ PAGE_ISSUE_META: Dict[str, tuple] = {
 }
 
 
+# What the client's team does about each type, in one imperative sentence a
+# marketing head can hand to a developer or an editor without translating it.
+# Kept beside PAGE_ISSUE_META rather than inside it so the tuple keeps its
+# shape; a registry test fails the build if a type is missing an action, so
+# the two cannot drift apart. Group and target types are phrased at template
+# level, because that is where the work happens.
+PAGE_ISSUE_ACTION: Dict[str, str] = {
+    "title_missing": "Write a page title for each of these pages.",
+    "title_too_long":
+        "Shorten these page titles so the important words come first.",
+    "title_too_short": "Give these pages a fuller page title.",
+    "meta_description_missing":
+        "Write a search description for each of these pages.",
+    "meta_description_too_long":
+        "Shorten these search descriptions so they are not cut short.",
+    "h1_missing": "Add a main heading to each of these pages.",
+    "h1_multiple": "Leave one main heading per page in this template.",
+    "noindex_page":
+        "Confirm these pages are meant to be hidden from search, and remove "
+        "the instruction from any that are not.",
+    "nofollow_page":
+        "Confirm these pages are meant to stop search engines following "
+        "their links, and remove the instruction from any that are not.",
+    "canonical_missing": "Name a preferred address on each of these pages.",
+    "canonical_off_page":
+        "Point the preferred address at the page it sits on.",
+    "canonical_consolidates_variant":
+        "No action needed, this is the site working as it should.",
+    "canonical_not_absolute":
+        "Write the preferred address as a full web address.",
+    "viewport_missing": "Add the mobile layout setting to this template.",
+    "html_lang_missing": "Declare the page language in this template.",
+    "images_missing_alt":
+        "Add a short description to every image in this template.",
+    "thin_page":
+        "Add useful text to these pages, or fold them into a stronger page.",
+    "mixed_content":
+        "Load every file on these pages over a secure connection.",
+    "schema_missing": "Add structured data to this template.",
+    "schema_invalid_json":
+        "Repair the structured data in this template so it can be read.",
+    "schema_missing_property":
+        "Fill in the required fields missing from this template's structured "
+        "data.",
+    "schema_microdata_only":
+        "Move the structured data in this template into the current format.",
+    "canonical_target_not_crawled":
+        "Check where these preferred addresses point, and correct any that "
+        "are wrong.",
+    "canonical_target_unchecked":
+        "Check by hand that these preferred addresses load.",
+    "canonical_target_non_200":
+        "Point these preferred addresses at a page that loads.",
+    "canonical_chain":
+        "Point these preferred addresses straight at the final page.",
+    "canonical_target_noindex":
+        "Point these preferred addresses at a page search engines may list.",
+    "hreflang_not_reciprocal":
+        "Make each language version name the others back.",
+    "hreflang_target_non_200":
+        "Point these language versions at addresses that load.",
+    "duplicate_title": "Give each of these pages its own page title.",
+    "duplicate_meta_description":
+        "Give each of these pages its own search description.",
+    "sitemap_noindex":
+        "Take the pages hidden from search out of the sitemap.",
+    "sitemap_off_canonical":
+        "List the preferred page in the sitemap instead of these addresses.",
+    "orphan_page":
+        "Link to these pages from the relevant city or category pages.",
+    "low_inlink_page":
+        "Add a second route into these pages from related pages.",
+    "broken_internal_link":
+        "Correct or remove the links in the template that point at these "
+        "addresses.",
+    "redirected_internal_link":
+        "Point these internal links straight at the address they end up on.",
+    "nofollow_internal_link":
+        "Let search engines follow these internal links.",
+    "generic_anchor":
+        "Replace wording such as click here with words describing the page.",
+    "external_link_broken":
+        "Repair or remove these links to other websites.",
+    "duplicate_content":
+        "Keep one page for this text and point the others at it.",
+    "near_duplicate_content":
+        "Give these pages their own text, local detail and offers.",
+    "performance_poor":
+        "Speed up this template, starting with images and third party "
+        "scripts.",
+    "lcp_poor": "Make the main content of this template appear sooner.",
+    "cls_poor":
+        "Reserve space for images and adverts so this template stops moving "
+        "as it loads.",
+    "inp_poor":
+        "Reduce the scripts that run when someone taps on this template.",
+    "performance_no_field_data":
+        "No action needed, this template has too few visitors for speed data "
+        "from real people.",
+    "pagespeed_error":
+        "No action needed, speed could not be measured for this template.",
+    "http_to_https_redirect":
+        "Ask the developers to send the insecure address on to the secure "
+        "one.",
+    "hsts_missing":
+        "Ask the developers to switch on the secure connection setting.",
+    "x_content_type_options_missing":
+        "Ask the developers to send the header that stops browsers guessing "
+        "file types.",
+    "x_frame_options_missing":
+        "Ask the developers to send the header that stops other sites "
+        "framing your pages.",
+    "csp_missing":
+        "Ask the developers to send a content security policy.",
+}
+
+
+def action_of(issue_type: str) -> str:
+    """The one thing to do about this type, in plain words."""
+    return PAGE_ISSUE_ACTION.get(issue_type, "")
+
+
 def label_of(issue_type: str) -> str:
     """The plain name for a client. Never the identifier."""
     entry = PAGE_ISSUE_META.get(issue_type)

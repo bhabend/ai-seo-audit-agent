@@ -338,8 +338,44 @@ and the other files that are already there.
 | Flag | Default | What it does |
 | --- | --- | --- |
 | `--run PATH` | required | The run folder to report on. |
-| `--model NAME` | `gpt-5-mini` | Model for the narrative. |
-| `--no-ai` | off | Write the narrative from templates. No API calls, no cost. |
+| `--format short\|long` | `short` | `short` is the client deliverable. `long` is the narrated report, for internal use. |
+| `--model NAME` | `gpt-5-mini` | Long format only: model for the narrative. |
+| `--no-ai` | off | Long format only: write the narrative from templates. |
+
+## The short report, which is the default
+
+**What a client receives.** A report that reads as a set of decisions rather
+than an essay: a score, ten fixes each with the one thing to do about it, one
+table per section, two charts, and nothing else. It is built entirely from
+`findings.json` by code, so it makes **no model calls and costs nothing**, and
+it cannot read as machine written prose because there is almost no prose in
+it. At most one lead sentence sits above each table, carrying that section's
+most important number.
+
+In order: the cover and what the crawl covered; the score with its
+distribution pie; the priority fixes table (rank, fix, pages affected,
+severity, scope, action); a table per section with `Finding | Count | Severity
+| Action`, ordered worst first, with a closing **In place** row saying what
+the site already gets right and what the section checked and did not find; the
+performance section, which adds the measured templates and a bar chart of
+mobile scores; the comparison with the previous audit when there is one; and
+an appendix of broken link groups and lowest scoring pages.
+
+**Every count states its whole**, in the client's vocabulary rather than the
+tool's: "3 of 842 pages parsed", "44 groups of 842 pages parsed", "2 of 3
+measured templates", and "the whole site" for a setting that applies
+everywhere. **Every action comes from the registry**, one imperative sentence
+per issue type, and a registry test fails the build if a type is ever added
+without one.
+
+**Validation before the command exits** adds to the shared checks: at most
+2,500 words outside tables, exactly two images, a whole in every count cell of
+the fixes and section tables, an action on every fix row, and no paragraph
+longer than two sentences after the cover. A template shape may appear in one
+place only, the developer column of the templates table.
+
+The narrated long format is unchanged and still available with
+`--format long`, for internal use and for clients who ask for the reasoning.
 
 **Cost.** At most **16 calls per report**: one per section, one for the
 executive summary, and up to five regenerations of sections the model cut
