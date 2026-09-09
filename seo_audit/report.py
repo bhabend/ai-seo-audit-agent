@@ -427,6 +427,12 @@ def build_document(findings: Dict, narrator: Narrator, charts: Dict,
         f"{(findings.get('meta') or {}).get('mode', 'baseline')}."))
     document.add_paragraph(_coverage_paragraph(findings))
 
+    if not (findings.get("headline") or {}).get("readable", True):
+        document.add_heading("The site could not be read", level=1)
+        document.add_paragraph(strip_dashes(
+            (findings.get("headline") or {}).get("unreadable_note")
+            or "No page could be read, so there is nothing to score."))
+
     document.add_heading("Executive summary", level=1)
     _add_section_body(document, narrator.summary(
         findings.get("headline") or {},
@@ -646,6 +652,20 @@ def _crawlability_table(section: Dict, coverage: Dict
         if count:
             rows.append((SEVERITY_RANK.get(severity, 2), -count,
                          [finding, cell, severity, action]))
+
+    # A refusal is the first thing to say about a crawl that met one: every
+    # other row here describes pages, and these are the ones nobody saw.
+    blocked = section.get("blocked") or {}
+    if blocked.get("count"):
+        statuses = ", ".join(f"HTTP {status}" for status
+                             in sorted(blocked.get("statuses") or {}))
+        add(blocked["count"],
+            _plain_count(blocked["count"], blocked.get("whole", 0),
+                         blocked.get("whole_is", "addresses requested")),
+            "Addresses the server refused", "high",
+            f"Ask whoever runs the site to let the audit through: the "
+            f"requests came back {statuses or 'refused'}, so no page behind "
+            f"them could be read.")
 
     count, cell = share(sitemap.get("in_sitemap_not_crawled"))
     add(count, cell, "Sitemap addresses the crawl never reached", "medium",
@@ -868,6 +888,15 @@ def _short_score(document, findings: Dict, charts: Dict) -> None:
     headline = findings.get("headline") or {}
     deduction = headline.get("site_level_deduction") or 0
     excluded = (headline.get("noindex_excluded") or {}).get("count", 0)
+
+    if not headline.get("readable", True):
+        # Nothing was read, so there is nothing to score. It goes where the
+        # score would have been, because it is the finding of this audit.
+        document.add_heading("The site could not be read", level=1)
+        document.add_paragraph(strip_dashes(
+            headline.get("unreadable_note")
+            or "No page could be read, so there is nothing to score."))
+        return
 
     document.add_heading("Score", level=1)
     sentence = (f"The site scores {headline.get('site_score')} out of 100 "
@@ -1135,7 +1164,9 @@ def _add_search_performance(document, findings: Dict, short: bool) -> None:
 
 
 def expected_headings_for_short(findings: Dict) -> List[str]:
-    headings = ["Score", "Priority fixes"]
+    readable = (findings.get("headline") or {}).get("readable", True)
+    headings = ["Score" if readable else "The site could not be read",
+                "Priority fixes"]
     headings += [title for key, title in SECTIONS
                  if findings.get(key) is not None]
     if (findings.get("comparison") or {}).get("previous_run"):
@@ -1393,6 +1424,8 @@ def validate_short(path: str, expected_headings: List[str],
 def expected_headings_for(findings: Dict) -> List[str]:
     headings = ["Executive summary", "Terms used in this report",
                 "Priority fixes"]
+    if not (findings.get("headline") or {}).get("readable", True):
+        headings.insert(0, "The site could not be read")
     headings += [title for key, title in SECTIONS if findings.get(key) is not None]
     if (findings.get("comparison") or {}).get("previous_run"):
         headings.append("Comparison with the previous audit")

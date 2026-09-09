@@ -53,7 +53,8 @@ CRAWLER_EFFECT: Dict[str, str] = {
     "slow_response":
         "Slow responses reduce how many pages a crawler fetches per visit.",
     "fetch_error":
-        "The crawler gets nothing back, so the page cannot be indexed.",
+        "The crawler gets no page back, so nothing here can be indexed: "
+        "either nothing answered, or the server refused the request.",
     "non_html_linked":
         "The URL is linked as if it were a page but returns something that is "
         "neither a page nor an indexable document.",

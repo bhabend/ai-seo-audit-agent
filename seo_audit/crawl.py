@@ -56,10 +56,26 @@ CHUNK_PER_WORKER = 4
 # Sweep throttle guard. 403 and 503 are how a site says "slow down"; treating
 # them as sitemap defects told a client two thirds of their sitemap was dead.
 THROTTLE_STATUSES = (403, 503)
+
 THROTTLE_CONSECUTIVE = 20
 THROTTLE_WINDOW = 100
 THROTTLE_RATE = 0.5
 MAX_SWEEP_DELAY = 4.0
+
+# The same reading, extended from the sweep to the crawl. A server that
+# refuses hands back a body: an edge network's "Access Denied", a login wall,
+# a rate limit notice. It is not the page, and nothing about the site can be
+# learned from it. An audit of a site nobody was allowed to read once
+# reported that its homepage had almost no text, which was true of the error
+# page and true of nothing else.
+BLOCKED_STATUSES = (401, 403, 429)
+
+
+def is_blocked_status(status: Optional[int]) -> bool:
+    """True when the server refused rather than answered."""
+    if status is None:
+        return False
+    return status in BLOCKED_STATUSES or status >= 500
 
 # External link checks: someone else's uptime, on our clock. One attempt,
 # and eight at a time -- 1,000 targets took 19 minutes one at a time.
@@ -84,6 +100,8 @@ class CrawlOutcome:
     sweep_capped: bool = False
     sweep_throttled: bool = False
     sweep_throttled_responses: int = 0
+    blocked_responses: int = 0
+    blocked_statuses: Dict[str, int] = field(default_factory=dict)
     redirect_duplicates: int = 0
     stage_seconds: Dict[str, float] = field(default_factory=dict)
     findings_written: bool = False
@@ -101,6 +119,12 @@ class CrawlOutcome:
     duration_seconds: float = 0.0
     started_at: Optional[str] = None
     paths: Dict[str, str] = field(default_factory=dict)
+
+    def record_blocked(self, status: Optional[int]) -> None:
+        """Count one refusal, by the status the server answered with."""
+        self.blocked_responses += 1
+        key = str(status)
+        self.blocked_statuses[key] = self.blocked_statuses.get(key, 0) + 1
 
 
 @contextmanager
@@ -271,8 +295,16 @@ class _Crawler:
         if row.get("redirect_loop"):
             self.issues.add("redirect_loop", url, referrer,
                             "redirect chain never resolved")
-        if status is not None and status >= 500:
-            self.issues.add("fetch_error", url, referrer, f"HTTP {status}")
+        if is_blocked_status(status):
+            # One record, naming the status, and nothing else about this URL.
+            # Every check below reads the body or the timing of a response
+            # this server never gave us: they would describe the refusal, and
+            # be filed as facts about the site.
+            self.issues.add(
+                "fetch_error", url, referrer,
+                f"HTTP {status}: the server refused the request, so no page "
+                f"was read")
+            return
         if (row.get("redirect_hops") or 0) >= 2:
             self.issues.add("redirect_chain", url, referrer,
                             f"{row['redirect_hops']} hops to {row.get('final_url')}")
@@ -323,10 +355,14 @@ class _Crawler:
         # Only a page that answered 200 with HTML is worth parsing, and only
         # the first URL to reach it. A second URL redirecting to the same page
         # still gets its raw_crawl row, so the redirect stays a finding.
+        blocked = is_blocked_status(result.status_code)
+        if blocked:
+            self.outcome.record_blocked(result.status_code)
+
         if result.html and result.status_code == 200:
             duplicate = not self.claim_page(base)
 
-        if result.html and not duplicate:
+        if result.html and not duplicate and not blocked:
             self.html_store.save(url, result.html)
             soup = make_soup(result.html)
             all_links = extract_links(soup, base)
@@ -480,7 +516,9 @@ def run_crawl(config: AuditConfig, out_dir: Optional[str] = None,
             "redirect_duplicate": False,
         }
         home_headers = dict(home.headers)
-        if home.html:
+        if is_blocked_status(home.status_code):
+            outcome.record_blocked(home.status_code)
+        if home.html and not is_blocked_status(home.status_code):
             base = home.final_url or start_url
             soup = make_soup(home.html)
             all_links = extract_links(soup, base)
@@ -892,8 +930,16 @@ def _run_cross_page_checks(crawler: _Crawler,
 def _run_site_level_checks(crawler: _Crawler, page_issues: PageIssueLog,
                            home_row: Optional[Dict],
                            home_headers: Dict[str, str]) -> None:
-    """Transport and header checks, recorded once against the homepage row."""
+    """Transport and header checks, recorded once against the homepage row.
+
+    Only when the homepage actually answered. The headers on a refusal
+    belong to whatever refused: an audit of a blocked site once reported
+    four missing security headers, every one of them a fact about an edge
+    network's error page rather than about the client's site.
+    """
     if home_row is None:
+        return
+    if home_row.get("status_code") != 200:
         return
     http_ok: Optional[bool] = None
     http_url = "http://" + crawler.config.host + "/"

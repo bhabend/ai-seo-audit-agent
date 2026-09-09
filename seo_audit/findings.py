@@ -201,13 +201,23 @@ def _meta(summary: Dict, run_dir: str) -> Dict:
 def _headline(summary: Dict) -> Dict:
     score = _dig(summary, "score", default={})
     scored = score.get("pages_scored", 0)
+    parsed = _dig(summary, "pages_parsed", default=0) or 0
+    blocked = _dig(summary, "blocked", "responses", default=0) or 0
+    statuses = _dig(summary, "blocked", "statuses", default={}) or {}
     distribution = {
         band: share(count, scored, "pages scored")
         for band, count in (score.get("distribution") or {}).items()
     }
     return {
-        "site_score": score.get("site_score"),
-        "mean_page_score": score.get("mean_page_score"),
+        # A site nobody was allowed to read has no score, and saying zero
+        # would be a measurement of something that never happened.
+        "readable": bool(parsed),
+        "blocked_responses": blocked,
+        "blocked_statuses": statuses,
+        "unreadable_note": _unreadable_note(blocked, statuses)
+        if not parsed else "",
+        "site_score": score.get("site_score") if parsed else None,
+        "mean_page_score": score.get("mean_page_score") if parsed else None,
         "performance_component": score.get("performance_component"),
         "performance_included": score.get("performance_included"),
         "performance_coverage": share(
@@ -224,6 +234,21 @@ def _headline(summary: Dict) -> Dict:
         "lowest_pages": (score.get("lowest_pages") or [])[:10],
         "note": score.get("note"),
     }
+
+
+def _unreadable_note(blocked: int, statuses: Dict) -> str:
+    """Why a run has no score, in the words of what came back."""
+    if blocked and statuses:
+        spread = ", ".join(f"{count} answered HTTP {status}"
+                           for status, count in sorted(statuses.items()))
+        return (f"No page could be read. Every address the crawl asked for "
+                f"was refused: {spread}. There is nothing to score, and the "
+                f"findings below describe the refusal rather than the site.")
+    if blocked:
+        return ("No page could be read. Every address the crawl asked for "
+                "was refused, so there is nothing to score.")
+    return ("No page could be read on this site, so there is nothing to "
+            "score.")
 
 
 def _evidence(rows: List[Dict], *fields: str) -> List[Dict]:
@@ -296,6 +321,11 @@ def _crawlability(summary: Dict, crawl_issues: List[Dict],
                                              "url", "detail"),
             "blocked_linked": counts.get("robots_blocked_linked", 0),
             "blocked_in_sitemap": counts.get("robots_blocked_in_sitemap", 0),
+        },
+        "blocked": {
+            **share(_dig(summary, "blocked", "responses", default=0), found,
+                    "addresses requested"),
+            "statuses": _dig(summary, "blocked", "statuses", default={}) or {},
         },
         "render_suspects": share(
             _dig(summary, "render_suspects", "count", default=0),

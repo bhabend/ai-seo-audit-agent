@@ -241,6 +241,12 @@ def build_summary(outcome) -> Dict[str, Any]:
         "max_depth_reached": (stats.max_depth_reached
                               if stats.max_depth_reached >= 0 else None),
         "errors": stats.errors,
+        # Refusals are counted apart from pages: a 403 is not a page that
+        # was read and found wanting, it is a page nobody was shown.
+        "blocked": {
+            "responses": outcome.blocked_responses,
+            "statuses": dict(sorted(outcome.blocked_statuses.items())),
+        },
         "non_html": stats.non_html,
         "redirected": stats.redirected,
         "render_suspects": {
