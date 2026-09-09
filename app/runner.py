@@ -6,12 +6,17 @@ commands wrote. If a question cannot be answered from a file in the run
 folder, this module does not answer it.
 
 The audit runs as its own process with its output redirected to
-`output/logs/<timestamp>.log`, so closing the browser, restarting Streamlit
-or losing the session does not stop it. Progress is read back from the files
-the run is writing, never from anything held in memory, and a run is finished
-when `findings.json` exists. The exit code is appended to the log when the
-process ends, which is how a run that died is told apart from one still
-working.
+`output/logs/audit-<timestamp>.log`, so closing the browser, restarting
+Streamlit or losing the session does not stop it. Progress is read back from
+the files the run is writing, never from anything held in memory, and a run
+is finished when `findings.json` exists. The exit code is appended to the log
+when the process ends, which is how a run that died is told apart from one
+still working.
+
+A file counts as a run log only when it carries the COMMAND and STARTED
+header this module writes. Anything else that lands in that folder, someone's
+redirected stdout included, is ignored rather than counted as a run nobody
+started.
 """
 
 from __future__ import annotations
@@ -92,19 +97,53 @@ def wrapped_command(command: List[str], log_path: str,
 # be assumed about it, but it must not block the console forever.
 STALE_AFTER_HOURS = 24
 
+# The two lines start_audit stamps at the top of every log it opens. They are
+# what makes a file a run log: not its name, and not the folder it sits in.
+COMMAND_PREFIX = "COMMAND="
+STARTED_PREFIX = "STARTED="
+HEADER_LINES = 8
+# New logs are named distinctively as well, so a folder listing reads
+# clearly. Old logs are bare timestamps and are still recognised, because
+# the header decides and the name only narrows the search.
+LOG_PREFIX = "audit-"
+
+
+def is_run_log(path: str) -> bool:
+    """True when this file is a log the runner itself opened.
+
+    The console was once started with its own output redirected into
+    output/logs/. That file ended in .log and had no exit code, so it read as
+    an audit in flight and the Start button stayed disabled with nothing
+    running. Anything can be written into a folder; only a run log carries
+    the header a run wrote, so that is what is checked. The name is a cheap
+    first pass, nothing more.
+    """
+    if not path or not path.lower().endswith(".log"):
+        return False
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            head = [next(handle, "") for _ in range(HEADER_LINES)]
+    except OSError:
+        return False
+    return (any(line.startswith(COMMAND_PREFIX) for line in head)
+            and any(line.startswith(STARTED_PREFIX) for line in head))
+
 
 def _unfinished(log_dir: str) -> List[str]:
+    """Run logs with no exit code yet, newest first."""
     if not os.path.isdir(log_dir):
         return []
-    logs = [os.path.join(log_dir, name) for name in os.listdir(log_dir)
-            if name.endswith(".log")]
-    return sorted((path for path in logs if exit_code_of(path) is None),
+    logs = [os.path.join(log_dir, name) for name in os.listdir(log_dir)]
+    return sorted((path for path in logs
+                   if is_run_log(path) and exit_code_of(path) is None),
                   key=os.path.getmtime, reverse=True)
 
 
 def is_stale(log_path: str, hours: float = STALE_AFTER_HOURS) -> bool:
-    """True when a log has no exit code and has gone quiet for too long."""
+    """True when a run log has no exit code and has gone quiet for too long."""
     if not log_path or not os.path.exists(log_path):
+        return False
+    if not is_run_log(log_path):
         return False
     if exit_code_of(log_path) is not None:
         return False
@@ -144,8 +183,8 @@ def start_audit(domain: str, options: Optional[Dict[str, Any]] = None,
                 "error": f"A run is already going: {busy[0]}. Wait for it to "
                          f"finish, or look at its log."}
     os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir,
-                            f"{time.strftime('%Y%m%d-%H%M%S')}.log")
+    log_path = os.path.join(
+        log_dir, f"{LOG_PREFIX}{time.strftime('%Y%m%d-%H%M%S')}.log")
     command = audit_command(domain, options)
 
     with open(log_path, "w", encoding="utf-8", errors="replace") as handle:

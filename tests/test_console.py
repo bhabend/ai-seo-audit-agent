@@ -22,6 +22,11 @@ import runner  # noqa: E402
 
 APP = os.path.join(APP_DIR, "streamlit_app.py")
 
+# Captured before any fixture patches them, so a test can point the real
+# check at a folder of its own.
+REAL_RUNNING_RUNS = runner.running_runs
+REAL_STALE_RUNS = runner.stale_runs
+
 
 # --- the run folder, at several states ---------------------------------------
 
@@ -43,12 +48,36 @@ def make_run_dir(tmp_path, *, files=(), rows=None, host="example.com",
     return str(path)
 
 
-def write_log(tmp_path, lines, name="20260101-000000.log"):
+def write_log(tmp_path, lines, name="20260101-000000.log", header=True):
+    """A log as the runner writes one, header included unless refused.
+
+    `header=False` writes a file that merely lives in the log folder and
+    ends in .log: somebody's redirected stdout, which is what broke the
+    console when it was counted as a run.
+    """
     log_dir = tmp_path / "output" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     path = log_dir / name
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    body = list(RUN_LOG_HEADER) + list(lines) if header else list(lines)
+    path.write_text("\n".join(body) + "\n", encoding="utf-8")
     return str(path)
+
+
+# What app/runner.py stamps at the top of every log it opens. A file without
+# it was not written by a run, whatever it is called.
+RUN_LOG_HEADER = (
+    "COMMAND=python -m seo_audit.cli --domain https://example.com",
+    "STARTED=2026-01-01T00:00:00",
+)
+
+
+def write_run_log(log_dir, name, lines, header=True):
+    """The same, into a log directory the caller already has."""
+    log_dir.mkdir(parents=True, exist_ok=True)
+    body = list(RUN_LOG_HEADER) + list(lines) if header else list(lines)
+    path = log_dir / name
+    path.write_text("\n".join(body) + "\n", encoding="utf-8")
+    return path
 
 
 # --- the log -----------------------------------------------------------------
@@ -647,9 +676,7 @@ def test_the_long_format_says_what_it_costs_before_it_is_run(app_runner):
 def test_a_second_start_is_refused_while_one_is_running(tmp_path,
                                                         monkeypatch):
     log_dir = tmp_path / "logs"
-    log_dir.mkdir()
-    (log_dir / "20260101-000000.log").write_text("working\n",
-                                                 encoding="utf-8")
+    write_run_log(log_dir, "20260101-000000.log", ["working"])
 
     called = []
     monkeypatch.setattr(runner.subprocess, "Popen",
@@ -664,8 +691,7 @@ def test_a_second_start_is_refused_while_one_is_running(tmp_path,
 
 def test_a_finished_log_does_not_block_the_next_run(tmp_path, monkeypatch):
     log_dir = tmp_path / "logs"
-    log_dir.mkdir()
-    (log_dir / "old.log").write_text("done\nEXIT_CODE=0\n", encoding="utf-8")
+    write_run_log(log_dir, "old.log", ["done", "EXIT_CODE=0"])
 
     class FakeProcess:
         pid = 7
@@ -682,9 +708,8 @@ def test_a_finished_log_does_not_block_the_next_run(tmp_path, monkeypatch):
 
 def test_running_runs_lists_only_the_unfinished_logs(tmp_path):
     log_dir = tmp_path / "logs"
-    log_dir.mkdir()
-    (log_dir / "a.log").write_text("EXIT_CODE=0\n", encoding="utf-8")
-    (log_dir / "b.log").write_text("still going\n", encoding="utf-8")
+    write_run_log(log_dir, "a.log", ["EXIT_CODE=0"])
+    write_run_log(log_dir, "b.log", ["still going"])
 
     running = runner.running_runs(str(log_dir))
     assert [os.path.basename(p) for p in running] == ["b.log"]
@@ -693,17 +718,14 @@ def test_running_runs_lists_only_the_unfinished_logs(tmp_path):
 def test_the_bound_view_ignores_a_folder_from_a_later_run(tmp_path):
     """A run started after this one must never steal the counters."""
     log_dir = tmp_path / "output" / "logs"
-    log_dir.mkdir(parents=True)
-    mine = log_dir / "20260101-000000.log"
-    mine.write_text("working\n", encoding="utf-8")
+    mine = write_run_log(log_dir, "20260101-000000.log", ["working"])
 
     older = make_run_dir(tmp_path, files=("raw_crawl.csv",),
                          name="20260101-000001")
     os.utime(mine, (os.path.getmtime(older) - 5,) * 2)
 
     # A second run appears, newer than mine, with its own folder.
-    later = log_dir / "20260102-000000.log"
-    later.write_text("working\n", encoding="utf-8")
+    write_run_log(log_dir, "20260102-000000.log", ["working"])
     newer_dir = make_run_dir(tmp_path, files=("raw_crawl.csv",),
                              host="other.com", name="20260102-000000")
 
@@ -711,7 +733,8 @@ def test_the_bound_view_ignores_a_folder_from_a_later_run(tmp_path):
     assert bound != newer_dir, "the view followed someone else's run"
 
     # Once the log names its folder, there is nothing left to infer.
-    mine.write_text(f"working\nRUN_DIR={older}\n", encoding="utf-8")
+    write_run_log(log_dir, "20260101-000000.log",
+                  ["working", f"RUN_DIR={older}"])
     assert runner.bound_run_dir(str(mine),
                                 root=str(tmp_path / "output")) == older
 
@@ -813,8 +836,7 @@ def test_a_run_that_stopped_a_day_ago_no_longer_blocks_the_console(tmp_path):
     """One reboot must not lock the console out for good."""
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
-    stale = log_dir / "old.log"
-    stale.write_text("crawling\n", encoding="utf-8")
+    stale = write_run_log(log_dir, "old.log", ["crawling"])
     old = time.time() - 25 * 3600
     os.utime(stale, (old, old))
 
@@ -826,8 +848,7 @@ def test_a_run_that_stopped_a_day_ago_no_longer_blocks_the_console(tmp_path):
 def test_a_run_that_started_an_hour_ago_still_blocks(tmp_path):
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
-    live = log_dir / "live.log"
-    live.write_text("crawling\n", encoding="utf-8")
+    live = write_run_log(log_dir, "live.log", ["crawling"])
     recent = time.time() - 3600
     os.utime(live, (recent, recent))
 
@@ -839,8 +860,7 @@ def test_a_run_that_started_an_hour_ago_still_blocks(tmp_path):
 def test_a_finished_log_is_never_stale(tmp_path):
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
-    done = log_dir / "done.log"
-    done.write_text("EXIT_CODE=0\n", encoding="utf-8")
+    done = write_run_log(log_dir, "done.log", ["EXIT_CODE=0"])
     old = time.time() - 100 * 3600
     os.utime(done, (old, old))
     assert not runner.is_stale(str(done))
@@ -1009,3 +1029,120 @@ def test_the_uploader_takes_a_workbook_a_zip_or_a_csv(app_runner):
     uploaders = list(app.get("file_uploader"))
     assert uploaders, "no uploader on the Results page"
     assert "Excel" in uploaders[0].label
+
+
+# --- session 15: only the runner's own logs count as runs ------------------
+
+FOREIGN = ["", "  You can now view your Streamlit app in your browser.", "",
+           "  Local URL: http://localhost:8501",
+           "  Network URL: http://192.168.29.96:8501"]
+
+
+def test_a_foreign_file_in_the_log_folder_is_not_a_run(tmp_path):
+    """The console's own redirected stdout is not an audit.
+
+    Observed live: starting the console with its output sent to
+    output/logs/streamlit-20260909-142702.log disabled the Start button,
+    because anything ending in .log with no EXIT_CODE counted as a run.
+    """
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    stray = write_run_log(log_dir, "streamlit-20260909-142702.log", FOREIGN,
+                          header=False)
+    now = time.time()
+    os.utime(stray, (now, now))
+
+    assert runner.is_run_log(str(stray)) is False
+    assert runner.running_runs(str(log_dir)) == []
+    assert runner.stale_runs(str(log_dir)) == []
+    assert runner.attach(log_dir=str(log_dir), root=str(tmp_path)) is None
+
+
+def test_a_foreign_file_does_not_refuse_the_next_run(tmp_path, monkeypatch):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    write_run_log(log_dir, "streamlit-20260909-142702.log", FOREIGN,
+                  header=False)
+
+    class FakeProcess:
+        pid = 31337
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(runner.subprocess, "Popen",
+                        lambda *a, **k: FakeProcess())
+    launch = runner.start_audit("https://example.com", {},
+                                log_dir=str(log_dir))
+
+    assert launch["ok"] is True, launch.get("error")
+    assert launch["pid"] == 31337
+
+
+def test_a_log_the_runner_wrote_is_still_a_run(tmp_path):
+    """The header decides, so a log named the old way still counts."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    old_style = write_run_log(log_dir, "20260101-000000.log", ["crawling"])
+
+    assert runner.is_run_log(str(old_style)) is True
+    assert runner.running_runs(str(log_dir)) == [str(old_style)]
+
+
+def test_new_run_logs_carry_a_name_of_their_own(tmp_path, monkeypatch):
+    """Distinctive on sight as well as on reading."""
+    class FakeProcess:
+        pid = 1
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(runner.subprocess, "Popen",
+                        lambda *a, **k: FakeProcess())
+    launch = runner.start_audit("https://example.com", {},
+                                log_dir=str(tmp_path / "logs"))
+
+    name = os.path.basename(launch["log"])
+    assert name.startswith(runner.LOG_PREFIX), name
+    assert name.endswith(".log")
+    assert runner.is_run_log(launch["log"]) is True
+
+
+def test_the_start_button_stays_live_beside_a_foreign_log(app_runner,
+                                                          tmp_path,
+                                                          monkeypatch):
+    """The whole point, seen from the page an operator is looking at."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    write_run_log(log_dir, "streamlit-20260909-142702.log", FOREIGN,
+                  header=False)
+    # The real in-flight check, pointed at that folder.
+    monkeypatch.setattr(runner, "running_runs",
+                        lambda log_dir=None: REAL_RUNNING_RUNS(str(
+                            tmp_path / "logs")))
+
+    app = app_test().run()
+    assert not app.exception
+    assert not app.warning, [warning.value for warning in app.warning]
+    assert not app.button[0].disabled, "start was disabled by a foreign file"
+
+
+def test_the_runs_page_lists_no_phantom_stopped_run(app_runner, tmp_path,
+                                                    monkeypatch):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    stray = write_run_log(log_dir, "streamlit-20260909-142702.log", FOREIGN,
+                          header=False)
+    # A day old, which is when a file with no exit code reaches this page.
+    old = time.time() - 25 * 3600
+    os.utime(stray, (old, old))
+    monkeypatch.setattr(runner, "stale_runs",
+                        lambda log_dir=None: REAL_STALE_RUNS(str(
+                            tmp_path / "logs")))
+
+    app = app_test().run()
+    app.sidebar.radio[0].set_value("Runs").run()
+
+    assert not app.exception
+    headers = [header.value for header in app.subheader]
+    assert "Stopped without finishing" not in headers, headers

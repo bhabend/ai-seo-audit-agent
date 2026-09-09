@@ -176,7 +176,9 @@ and `findings.json`; then `gsc_join.csv` once an export is attached, the
 `.docx` once a report is written, and `report_usage.json` after a long report.
 `links.csv` only with `--write-links`.
 
-Console logs live in `output/logs/<timestamp>.log`, carrying the command, the
-`RUN_DIR=` line and the `EXIT_CODE=` line saying how the run ended. An uploaded
+Console logs live in `output/logs/audit-<timestamp>.log`, carrying the
+command, the `RUN_DIR=` line and the `EXIT_CODE=` line saying how the run
+ended. A file counts as a run log only if it carries that header, so anything
+else left in the folder is ignored rather than read as a run. An uploaded
 export is written to a temporary file, used and deleted: **the client's export
 is never kept**, only the audit's own join.

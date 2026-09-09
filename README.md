@@ -419,9 +419,12 @@ block below is a fragment that re-reads the run's files **every four
 seconds** while it goes, and stops asking once the run writes its exit code.
 A "Refresh now" button is there for anyone who does not want to wait.
 
-**One audit at a time.** The Start button is disabled while any log has no
-exit code, and says which run is going. A log that never wrote an exit code
-and has been quiet for **more than 24 hours** is treated as stopped: the
+**One audit at a time.** The Start button is disabled while a run log has no
+exit code, and says which run is going. Only logs the console itself wrote
+count: a file needs the `COMMAND` and `STARTED` header for that, so somebody
+redirecting other output into `output/logs/` cannot disable the button. A run
+log that never wrote an exit code and has been quiet for **more than 24
+hours** is treated as stopped: the
 machine it ran on is gone, so it no longer blocks a new run, and the Runs
 page lists it under "stopped without finishing" with its last lines. It is
 never silently dropped. The progress view is bound to the log
@@ -469,9 +472,9 @@ reads `.env` except the commands themselves.
 **Runs survive the browser.** The audit is its own process, so closing the tab
 or restarting Streamlit does not stop it. Progress is read from the run
 folder, never from memory: a run is finished when `findings.json` exists.
-Each run logs to `output/logs/<timestamp>.log`, which carries the command, the
-`RUN_DIR=` line the audit prints when the folder is named, and `EXIT_CODE=` at
-the end. The exit code is written by a one line wrapper around the audit, not
+Each run logs to `output/logs/audit-<timestamp>.log`, which carries the
+command, the `RUN_DIR=` line the audit prints when the folder is named, and
+`EXIT_CODE=` at the end. The exit code is written by a one line wrapper around the audit, not
 by the console, so a run that fails while nobody is watching still records how
 it ended. On startup the console re-attaches to the newest log whose run has
 neither findings nor an exit code.
