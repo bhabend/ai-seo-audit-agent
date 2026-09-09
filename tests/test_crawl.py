@@ -198,8 +198,10 @@ def test_error_pages_are_recorded_with_their_status(tmp_path):
 
     assert run.summary["status_counts"] == {"200": 1, "404": 1, "500": 1}
     assert run.summary["pages_found"] == 3
-    # A 5xx is a page the crawler could not read, so it is a fetch error.
-    assert [i["url"] for i in run.issues_of("fetch_error")] == [BASE + "/broken"]
+    # A 5xx is a page the crawler could not read: the server answered and
+    # refused it, which is a refusal rather than a transport failure.
+    assert [i["url"] for i in run.issues_of("request_refused")] ==         [BASE + "/broken"]
+    assert run.issues_of("fetch_error") == []
 
 
 def test_slow_pages_are_reported(tmp_path, monkeypatch):

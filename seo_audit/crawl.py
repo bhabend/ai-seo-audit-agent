@@ -31,9 +31,10 @@ from .discovery import (RobotsInfo, SitemapResult, discover_sitemaps,
                         effective_crawl_delay, fetch_robots)
 from .fetch import Fetcher, is_html_content_type
 from .findings import build_findings
-from .issues import (DEEP_PAGE_DEPTH, RENDER_SUSPECT_CHARS, SLOW_DOCUMENT_MS,
+from .issues import (BLOCKED_STATUSES, DEEP_PAGE_DEPTH,
+                     RENDER_SUSPECT_CHARS, SLOW_DOCUMENT_MS,
                      SLOW_RESPONSE_MS, IssueLog, PageIssueLog,
-                     ai_crawler_groups)
+                     ai_crawler_groups, is_blocked_status)
 from .output import (AUDIT_PAGE_COLUMNS, CSV_COLUMNS, SWEEP_COLUMNS,
                      CrawlStats, HtmlStore, StreamingCsv, write_summary_json)
 from .content import MIN_WORDS_FOR_COMPARISON, ContentIndex, fingerprint
@@ -62,20 +63,11 @@ THROTTLE_WINDOW = 100
 THROTTLE_RATE = 0.5
 MAX_SWEEP_DELAY = 4.0
 
-# The same reading, extended from the sweep to the crawl. A server that
-# refuses hands back a body: an edge network's "Access Denied", a login wall,
-# a rate limit notice. It is not the page, and nothing about the site can be
-# learned from it. An audit of a site nobody was allowed to read once
-# reported that its homepage had almost no text, which was true of the error
-# page and true of nothing else.
-BLOCKED_STATUSES = (401, 403, 429)
-
-
-def is_blocked_status(status: Optional[int]) -> bool:
-    """True when the server refused rather than answered."""
-    if status is None:
-        return False
-    return status in BLOCKED_STATUSES or status >= 500
+# BLOCKED_STATUSES and is_blocked_status live in issues.py, imported above,
+# because robots.txt and the sitemap meet the same refusals as a page does
+# and every path has to read them the same way. An audit of a site nobody
+# was allowed to read once reported that its homepage had almost no text,
+# which was true of the error page and true of nothing else.
 
 # External link checks: someone else's uptime, on our clock. One attempt,
 # and eight at a time -- 1,000 targets took 19 minutes one at a time.
@@ -301,7 +293,7 @@ class _Crawler:
             # this server never gave us: they would describe the refusal, and
             # be filed as facts about the site.
             self.issues.add(
-                "fetch_error", url, referrer,
+                "request_refused", url, referrer,
                 f"HTTP {status}: the server refused the request, so no page "
                 f"was read")
             return
@@ -476,6 +468,14 @@ def run_crawl(config: AuditConfig, out_dir: Optional[str] = None,
     outcome.crawl_delay_applied = delay
 
     pending_issues: List[Tuple] = []
+    if is_blocked_status(robots.status_code):
+        # Not "no robots file": a file we were not allowed to read. The two
+        # call for different work and only one of them is our finding.
+        outcome.record_blocked(robots.status_code)
+        pending_issues.append((
+            "request_refused", robots.url, None,
+            f"HTTP {robots.status_code}: the server refused the robots file, "
+            f"so what it allows is unknown"))
     for agent, rules in ai_crawler_groups(robots.raw_text):
         pending_issues.append(("ai_crawler_rule", robots.url, None,
                                f"{agent}: {'; '.join(rules) or 'no rules'}"))
@@ -570,6 +570,14 @@ def run_crawl(config: AuditConfig, out_dir: Optional[str] = None,
 
         # --- sitemaps, now resolved against the adopted host ---
         sitemap = discover_sitemaps(fetcher, config, robots)
+        for sitemap_url, status in sitemap.refused:
+            # The same reading as the homepage: refused is not absent, and
+            # "the sitemap lists 0 addresses" would be a claim about a file
+            # nobody was shown.
+            outcome.record_blocked(status)
+            issues.add("request_refused", sitemap_url, None,
+                       f"HTTP {status}: the server refused the sitemap "
+                       f"request, so whether the site has one is unknown")
         outcome.sitemap = sitemap
         sitemap_urls = [
             u for u in sitemap.urls

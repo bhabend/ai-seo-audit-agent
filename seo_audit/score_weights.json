@@ -371,6 +371,11 @@
       "points": 0,
       "scope": "crawl"
     },
+    "request_refused": {
+      "bucket": null,
+      "points": 0,
+      "scope": "crawl"
+    },
     "robots_blocked_in_sitemap": {
       "bucket": null,
       "points": 0,

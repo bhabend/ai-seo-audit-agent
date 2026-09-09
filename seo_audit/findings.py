@@ -283,6 +283,13 @@ def _crawlability(summary: Dict, crawl_issues: List[Dict],
             "sitemaps_used": _dig(summary, "sitemap", "sitemaps_used",
                                   default=[]),
             "urls_total": sitemap_total,
+            "refused": _dig(summary, "sitemap", "refused", default=[]) or [],
+            # Every sitemap address the run asked for, so a refusal count has
+            # something to be a share of.
+            "requests": (len(_dig(summary, "sitemap", "sitemaps_failed",
+                                  default=[]) or [])
+                         + len(_dig(summary, "sitemap", "sitemaps_used",
+                                    default=[]) or [])),
             "urls_swept": share(_dig(summary, "sitemap_sweep",
                                      "sitemap_urls_swept", default=0),
                                 sitemap_total, "sitemap URLs"),
@@ -310,6 +317,8 @@ def _crawlability(summary: Dict, crawl_issues: List[Dict],
         },
         "robots": {
             "found": _dig(summary, "robots", "found", default=False),
+            "refused": _dig(summary, "robots", "refused", default=False),
+            "status_code": _dig(summary, "robots", "status_code"),
             "fetched_from_host": _dig(summary, "robots", "fetched_from_host"),
             "disallow_rules": _dig(summary, "robots", "disallow_rules",
                                    default=0),
@@ -323,7 +332,17 @@ def _crawlability(summary: Dict, crawl_issues: List[Dict],
             "blocked_in_sitemap": counts.get("robots_blocked_in_sitemap", 0),
         },
         "blocked": {
-            **share(_dig(summary, "blocked", "responses", default=0), found,
+            # Every address the run asked for: the pages, the robots file
+            # when one was requested, and each sitemap address tried. A
+            # refusal count out of the page count alone read "4 of 1".
+            **share(_dig(summary, "blocked", "responses", default=0),
+                    found
+                    + (1 if _dig(summary, "robots", "status_code") is not None
+                       else 0)
+                    + len(_dig(summary, "sitemap", "sitemaps_failed",
+                               default=[]) or [])
+                    + len(_dig(summary, "sitemap", "sitemaps_used",
+                               default=[]) or []),
                     "addresses requested"),
             "statuses": _dig(summary, "blocked", "statuses", default={}) or {},
         },

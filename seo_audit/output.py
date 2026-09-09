@@ -16,6 +16,8 @@ import os
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
+from .issues import is_blocked_status
+
 CSV_COLUMNS = [
     "url",
     "final_url",
@@ -270,6 +272,9 @@ def build_summary(outcome) -> Dict[str, Any]:
             key=lambda kv: (-kv[1], kv[0]))),
         "robots": {
             "found": bool(robots and robots.found),
+            # A refused robots file is not a missing one. Both leave `found`
+            # false, and only one of them is a finding about the site.
+            "refused": bool(robots and is_blocked_status(robots.status_code)),
             "url": robots.url if robots else None,
             # robots.txt is read before the homepage tells us which host the
             # site really serves, so this may be the pre-adoption hostname.
@@ -288,6 +293,9 @@ def build_summary(outcome) -> Dict[str, Any]:
                 for u, why in (sitemap.sitemaps_failed if sitemap else [])
             ],
             "urls_in_sitemap": len(sitemap.urls) if sitemap else 0,
+            "refused": [{"url": url, "status": status}
+                        for url, status in (sitemap.refused if sitemap
+                                            else [])],
         },
         "sitemap_sweep": {
             "sitemap_urls_total": outcome.sitemap_urls_total,

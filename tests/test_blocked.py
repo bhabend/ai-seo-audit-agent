@@ -77,8 +77,11 @@ def test_no_finding_is_drawn_from_the_error_page(tmp_path):
 
 
 def test_the_refusal_itself_is_recorded_with_its_status(tmp_path):
+    """A refusal has its own type: "nothing answered" is a different fact."""
     run = refused_site(tmp_path)
-    refusals = run.issues_of("fetch_error")
+    refusals = run.issues_of("request_refused")
+
+    assert run.issues_of("fetch_error") == []
 
     assert [row["url"] for row in refusals] == [BASE + "/"]
     assert "403" in refusals[0]["detail"]

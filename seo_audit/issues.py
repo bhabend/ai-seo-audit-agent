@@ -53,8 +53,10 @@ CRAWLER_EFFECT: Dict[str, str] = {
     "slow_response":
         "Slow responses reduce how many pages a crawler fetches per visit.",
     "fetch_error":
-        "The crawler gets no page back, so nothing here can be indexed: "
-        "either nothing answered, or the server refused the request.",
+        "The crawler gets nothing back, so the page cannot be indexed.",
+    "request_refused":
+        "The server answered, but refused: nothing behind this address was "
+        "read, and nothing about it can be judged from what came back.",
     "non_html_linked":
         "The URL is linked as if it were a page but returns something that is "
         "neither a page nor an indexable document.",
@@ -76,6 +78,19 @@ CRAWLER_EFFECT: Dict[str, str] = {
 }
 
 ISSUE_COLUMNS = ["issue_type", "url", "referrer", "detail", "crawler_effect"]
+
+# A server that refuses hands back a body: an edge network's "Access Denied",
+# a login wall, a rate limit notice. It is not the thing that was asked for.
+# The test lives here rather than in the crawl, because robots.txt and the
+# sitemap are refused by the same servers and must read them the same way.
+BLOCKED_STATUSES = (401, 403, 429)
+
+
+def is_blocked_status(status) -> bool:
+    """True when the server refused rather than answered."""
+    if status is None:
+        return False
+    return status in BLOCKED_STATUSES or status >= 500
 
 # Thresholds the crawl layer judges against.
 DEEP_PAGE_DEPTH = 3

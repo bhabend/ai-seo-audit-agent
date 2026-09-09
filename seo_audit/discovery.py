@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 from urllib.parse import urljoin, urlsplit
 
+from .issues import is_blocked_status
 from .urlnorm import normalize
 
 MAX_SITEMAP_DEPTH = 3
@@ -199,6 +200,9 @@ class SitemapResult:
     sitemaps_used: List[str] = field(default_factory=list)
     sitemaps_failed: List[Tuple[str, str]] = field(default_factory=list)
     source_of_sitemap: Optional[str] = None  # config | robots | guess
+    # Sitemap requests the server refused, as (url, status). A refusal is not
+    # an absent sitemap: it says nothing about whether one exists.
+    refused: List[Tuple[str, int]] = field(default_factory=list)
     # Every sitemap URL seen, however we heard about it:
     # (url, how_we_found_it, whether it yielded anything).
     candidates: List[Tuple[str, str, bool]] = field(default_factory=list)
@@ -225,6 +229,8 @@ def collect_sitemap_urls(fetcher, start_urls: List[str],
         if error is not None or status != 200 or not body:
             result.sitemaps_failed.append(
                 (sitemap_url, error or "HTTP " + str(status)))
+            if is_blocked_status(status):
+                result.refused.append((sitemap_url, status))
             if origin != "guess":
                 # A conventional path we merely tried is not evidence of a
                 # sitemap; one robots.txt advertises and fails to serve is.
@@ -257,17 +263,25 @@ def discover_sitemaps(fetcher, config, robots: RobotsInfo) -> SitemapResult:
         result.source_of_sitemap = "config" if result.sitemaps_used else None
         return result
 
+    refused: List[Tuple[str, int]] = []
     if robots.sitemaps:
         result = collect_sitemap_urls(fetcher, list(robots.sitemaps),
                                       source="robots")
         if result.sitemaps_used:
             result.source_of_sitemap = "robots"
             return result
+        refused = list(result.refused)
 
     guesses = [config.url_for("/sitemap.xml"),
                config.url_for("/sitemap_index.xml")]
     result = collect_sitemap_urls(fetcher, guesses, source="guess")
     result.source_of_sitemap = "guess" if result.sitemaps_used else None
+    # A refusal earlier in the ladder is still a refusal, even though a later
+    # attempt also came to nothing. Dropping it would leave the run saying
+    # the site has no sitemap when nobody was allowed to look.
+    seen = {url for url, _status in result.refused}
+    result.refused.extend((url, status) for url, status in refused
+                          if url not in seen)
     return result
 
 

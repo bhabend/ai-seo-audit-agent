@@ -735,12 +735,32 @@ def _crawlability_table(section: Dict, coverage: Dict
         "Links to files that are neither pages nor documents", "low",
         "Point these links at a page, or remove them.")
 
+    if robots.get("refused"):
+        add(1, "1 of 1 request for the robots file",
+            "The robots file could not be read", "high",
+            f"Ask whoever runs the site to let the audit fetch robots.txt: "
+            f"the request came back HTTP {robots.get('status_code')}, so "
+            f"what the site allows is unknown.")
+    refused_sitemaps = section.get("sitemap", {}).get("refused") or []
+    if refused_sitemaps:
+        statuses = ", ".join(sorted({f"HTTP {entry.get('status')}"
+                                     for entry in refused_sitemaps}))
+        count = len(refused_sitemaps)
+        attempts = max(section.get("sitemap", {}).get("requests", 0), count)
+        add(count,
+            f"{count} of {attempts} sitemap request"
+            + ("" if attempts == 1 else "s"),
+            "The sitemap could not be read", "high",
+            f"Ask whoever runs the site to let the audit fetch the sitemap: "
+            f"the requests came back {statuses}, so whether the site has one "
+            f"is unknown.")
+
     in_place = []
     if robots.get("found"):
         in_place.append("a robots file is in place")
     if listed:
         in_place.append(f"a sitemap is in place, listing {listed} addresses")
-    if not section.get("fetch_errors"):
+    if not section.get("fetch_errors") and not blocked.get("count")             and not robots.get("refused") and not refused_sitemaps:
         in_place.append("every address the crawl asked for answered")
 
     rows.sort(key=lambda item: (item[0], item[1]))
@@ -802,9 +822,12 @@ def _short_lead(section_name: str, section: Any, rows: List[List[str]],
                 f"{section.get('mean_desktop_score')} of 100 on a desktop.")
     if section_name == "crawlability":
         sitemap = (section or {}).get("sitemap") or {}
-        return (f"The crawl reached {coverage.get('pages_found', 0)} "
-                f"addresses and the sitemap lists "
-                f"{sitemap.get('urls_total', 0)}.")
+        reached = coverage.get("pages_found", 0)
+        if sitemap.get("refused"):
+            return (f"The crawl reached {reached} addresses. The sitemap "
+                    f"could not be read: the server refused the request.")
+        return (f"The crawl reached {reached} addresses and the sitemap "
+                f"lists {sitemap.get('urls_total', 0)}.")
     if not rows:
         return "Nothing to fix in this section."
     first = rows[0][0]
@@ -870,11 +893,20 @@ def _short_cover(document, findings: Dict, host: str) -> None:
     document.add_paragraph(strip_dashes(
         f"Prepared {date.today().isoformat()}. Mode: "
         f"{meta.get('mode', 'baseline')}."))
+    sitemap = (findings.get("crawlability") or {}).get("sitemap") or {}
+    if sitemap.get("refused"):
+        # "The sitemap lists 0 addresses" is a claim about a file the server
+        # would not hand over. Whether one exists is simply unknown.
+        sitemap_sentence = ("The sitemap could not be read: the server "
+                            "refused the request.")
+    else:
+        sitemap_sentence = (f"The sitemap lists "
+                            f"{coverage.get('sitemap_urls_total', 0)} "
+                            f"addresses.")
     document.add_paragraph(strip_dashes(
         f"The crawl reached {coverage.get('pages_found', 0)} addresses on "
         f"{host} and read {coverage.get('pages_parsed', 0)} of them as "
-        f"pages. The sitemap lists {coverage.get('sitemap_urls_total', 0)} "
-        f"addresses."))
+        f"pages. {sitemap_sentence}"))
     document.add_paragraph(strip_dashes(
         f"Limits: at most {caps.get('max_pages')} pages, "
         f"{caps.get('max_depth')} clicks from the home page, "
