@@ -6,12 +6,15 @@ import argparse
 import json
 import os
 import sys
+from contextlib import contextmanager
 
 from dotenv import load_dotenv
 
+from . import crawl
 from .config import AuditConfig
 from .crawl import run_crawl
 from .output import build_summary
+from .pagespeed import api_key as pagespeed_key
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -85,6 +88,52 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# The console reads these from the run log to say which stage is running.
+# Each is printed as its stage begins, on the same boundaries the summary's
+# stage_seconds are timed on, so the console repeats what the run said rather
+# than guessing from which files exist.
+STAGE_PREFIX = "STAGE="
+
+
+def announce_stage(name: str) -> None:
+    print(f"{STAGE_PREFIX}{name}", file=sys.stderr, flush=True)
+
+
+@contextmanager
+def announced_stages():
+    """Print a STAGE= line as each stage of run_crawl after the crawl begins.
+
+    run_crawl already marks those stages: each one after the crawl is timed
+    through crawl._stage, and the sitemap sweep is a single call to
+    crawl._sweep. Both are wrapped for the length of one run and put back
+    afterwards, so the crawl does exactly what it did before and nothing else
+    that calls run_crawl sees a line it did not ask for.
+    """
+    timed, sweep = crawl._stage, crawl._sweep
+
+    @contextmanager
+    def stage(outcome, name):
+        if name == "pagespeed" and not (outcome.config.pagespeed
+                                        and pagespeed_key()):
+            # The same test run_crawl makes before calling anyone: no call
+            # goes out, so the console must not say speed is being measured.
+            announce_stage("pagespeed_skipped")
+        else:
+            announce_stage(name)
+        with timed(outcome, name):
+            yield
+
+    def announced_sweep(*args, **kwargs):
+        announce_stage("sitemap_sweep")
+        return sweep(*args, **kwargs)
+
+    crawl._stage, crawl._sweep = stage, announced_sweep
+    try:
+        yield
+    finally:
+        crawl._stage, crawl._sweep = timed, sweep
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     # Keys come from the environment only, never from the command line.
@@ -117,7 +166,8 @@ def main(argv=None) -> int:
           f"depth {config.max_depth}, {config.workers} workers)...",
           file=sys.stderr)
 
-    outcome = run_crawl(config, out_dir=args.out)
+    with announced_stages():
+        outcome = run_crawl(config, out_dir=args.out)
     # The console reads this to pin the folder a run wrote to. It cannot come
     # earlier: the folder is named inside run_crawl, once the homepage has
     # said which host the site actually answers on.

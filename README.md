@@ -415,9 +415,15 @@ delete folders. Everything it shows comes from `findings.json`,
 **Run audit.** Domain, optional sitemap, page and worker limits, PageSpeed on
 or off, comparison on or off, and an advanced expander for the sweep and
 external check limits. Starting a run launches the command; the progress
-block below is a fragment that re-reads the run's files **every four
+block below is a fragment that re-reads the run's log and files **every four
 seconds** while it goes, and stops asking once the run writes its exit code.
 A "Refresh now" button is there for anyone who does not want to wait.
+While the run is in flight a panel shows the stage it is in, from the
+`STAGE=` line the audit prints as each stage begins, the time since it
+started, and that stage's counts: rows written so far to the file holding
+them, never an estimate. There is no percentage and no time remaining,
+because the crawl finds pages as it goes and never knows a total. The panel
+is gone once the run ends.
 
 **One audit at a time.** The Start button is disabled while a run log has no
 exit code, and says which run is going. Only logs the console itself wrote
@@ -470,11 +476,11 @@ console runs without either, and the short report needs neither. Nothing
 reads `.env` except the commands themselves.
 
 **Runs survive the browser.** The audit is its own process, so closing the tab
-or restarting Streamlit does not stop it. Progress is read from the run
-folder, never from memory: a run is finished when `findings.json` exists.
-Each run logs to `output/logs/audit-<timestamp>.log`, which carries the
-command, the `RUN_DIR=` line the audit prints when the folder is named, and
-`EXIT_CODE=` at the end. The exit code is written by a one line wrapper around the audit, not
+or restarting Streamlit does not stop it. Progress is read from the run's
+log and folder, never from memory: a run is finished when `findings.json`
+exists. Each run logs to `output/logs/audit-<timestamp>.log`, which carries
+the command, a `STAGE=` line as each stage begins, the `RUN_DIR=` line the
+audit prints when the folder is named, and `EXIT_CODE=` at the end. The exit code is written by a one line wrapper around the audit, not
 by the console, so a run that fails while nobody is watching still records how
 it ended. On startup the console re-attaches to the newest log whose run has
 neither findings nor an exit code.

@@ -157,9 +157,13 @@ def _render_progress(log_path: str) -> bool:
     st.caption(f"Watching {log_path}")
     if status["run_dir"]:
         st.caption(f"Writing to {status['run_dir']}")
-    columns = st.columns(3)
-    for column, (label, value) in zip(columns, status["counters"].items()):
-        column.metric(label.title(), value)
+    if status["running"]:
+        _live_panel(status)
+    else:
+        columns = st.columns(3)
+        for column, (label, value) in zip(columns,
+                                          status["counters"].items()):
+            column.metric(label.title(), value)
 
     if status["failed"]:
         st.error(f"The run stopped without findings. "
@@ -172,6 +176,47 @@ def _render_progress(log_path: str) -> bool:
         st.caption(f"Refreshing every {REFRESH_SECONDS} seconds.")
         st.button("Refresh now", key="refresh")
     return not status["running"]
+
+
+def _live_panel(status) -> None:
+    """What a run in flight is doing: time so far and its stage's counts.
+
+    Every number is one the run wrote down. The stage above is the last STAGE
+    line in its log, the time runs from its STARTED line, and each count is
+    rows in the file that holds them. There is no percentage and no time
+    remaining: the crawl finds pages as it goes and never knows a total.
+    """
+    counts = list(status.get("stage_counts") or [])
+    with st.container(border=True):
+        columns = st.columns(1 + len(counts))
+        columns[0].metric("Elapsed",
+                          format_elapsed(status.get("elapsed_seconds")))
+        for column, (label, value) in zip(columns[1:], counts):
+            column.metric(label, value)
+        if counts:
+            st.caption("Rows the run has written so far. The crawl finds "
+                       "pages as it goes, so there is no total to count "
+                       "towards.")
+        elif status.get("stage") == "starting":
+            st.caption("No run folder yet: robots.txt and the homepage are "
+                       "fetched first.")
+        else:
+            st.caption("The run's folder is not known yet, so there are no "
+                       "rows to count.")
+
+
+def format_elapsed(seconds) -> str:
+    """Whole seconds as 45s, 2m 05s or 1h 02m."""
+    if seconds is None:
+        return "n/a"
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
 
 
 # --- page 2: results ---------------------------------------------------------

@@ -6,6 +6,7 @@ own AppTest against a mocked runner, so a page that stops rendering fails
 here rather than in front of an operator.
 """
 
+import csv
 import json
 import os
 import sys
@@ -26,6 +27,8 @@ APP = os.path.join(APP_DIR, "streamlit_app.py")
 # check at a folder of its own.
 REAL_RUNNING_RUNS = runner.running_runs
 REAL_STALE_RUNS = runner.stale_runs
+REAL_POLL = runner.poll
+REAL_EXIT_CODE_OF = runner.exit_code_of
 
 
 # --- the run folder, at several states ---------------------------------------
@@ -418,12 +421,18 @@ def app_runner(monkeypatch, tmp_path):
 
     def fake_poll(run_dir_arg, log_path=None):
         calls.polled.append((run_dir_arg, log_path))
-        return {"stage": "crawling", "running": calls.exit_code is None,
+        running = calls.exit_code is None
+        return {"stage": "crawling", "running": running,
                 "done": False,
                 "failed": False, "run_dir": run_dir,
                 "counters": {"pages": 12, "issues": 3,
                              "sitemap urls swept": 0},
-                "exit_code": calls.exit_code, "tail": "working"}
+                "exit_code": calls.exit_code, "tail": "working",
+                "marker": None,
+                "elapsed_seconds": 125.0 if running else None,
+                "stage_counts": ([("Addresses crawled", 12),
+                                  ("Page issues found", 3)]
+                                 if running else [])}
 
     def fake_report(path, fmt="short", python=None):
         calls.reports.append((path, fmt))
@@ -1146,3 +1155,265 @@ def test_the_runs_page_lists_no_phantom_stopped_run(app_runner, tmp_path,
     assert not app.exception
     headers = [header.value for header in app.subheader]
     assert "Stopped without finishing" not in headers, headers
+
+
+# --- live progress: the stage the run announces, the rows it has written ----
+
+def stream_rows(path, count):
+    """Append rows the way the audit streams them, header on first write.
+
+    Every title carries a line break inside its quoted cell, as real page
+    titles do, so a count that reads lines instead of rows is caught.
+    """
+    exists = os.path.exists(path)
+    with open(path, "a", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        if not exists:
+            writer.writerow(["url", "title"])
+        for index in range(count):
+            writer.writerow([f"https://example.com/{index}",
+                             "a title\nthat wraps"])
+
+
+def announced(err_lines):
+    return [line[len(runner.STAGE_PREFIX):] for line in err_lines
+            if line.startswith(runner.STAGE_PREFIX)]
+
+
+def test_the_stage_is_the_one_the_run_announced_not_a_guess(tmp_path):
+    run_dir = make_run_dir(
+        tmp_path, files=("raw_crawl.csv", "sitemap_sweep.csv"),
+        rows={"raw_crawl.csv": 40, "sitemap_sweep.csv": 5})
+    # From the files alone this reads as the link checks, which it is not.
+    assert runner.stage_of(run_dir) == "checking links"
+
+    log = write_log(tmp_path, ["Crawling https://example.com ...",
+                               "STAGE=sitemap_sweep"])
+    assert runner.stage_of(run_dir, log) == "checking sitemap addresses"
+
+    write_log(tmp_path, ["STAGE=sitemap_sweep", "STAGE=graph_and_content"])
+    assert runner.stage_marker_of(log) == "graph_and_content"
+    assert runner.stage_of(run_dir, log) == "checking links and content"
+
+
+def test_the_stage_counts_are_rows_on_disk_and_rise_with_them(tmp_path):
+    run_dir = make_run_dir(tmp_path)
+    log = write_log(tmp_path, ["STAGE=graph_and_content"])
+    stream_rows(os.path.join(run_dir, "audit_pages.csv"), 12)
+    stream_rows(os.path.join(run_dir, "page_issues.csv"), 30)
+
+    status = runner.poll(run_dir, log)
+    assert status["running"] and status["marker"] == "graph_and_content"
+    assert status["stage_counts"] == [("Page issues found", 30),
+                                      ("Pages parsed", 12)]
+
+    stream_rows(os.path.join(run_dir, "page_issues.csv"), 7)
+    assert runner.poll(run_dir, log)["stage_counts"][0] == (
+        "Page issues found", 37)
+    # Nothing is projected: no total, no share done, no time remaining.
+    assert not {"total", "percent", "eta", "remaining"} & set(status)
+
+
+def test_every_announced_stage_has_words_and_counts():
+    for label in runner.STAGE_LABELS.values():
+        assert label in runner.STAGE_COUNTS, label
+        assert all(name in runner.COUNT_FILES
+                   for name in runner.STAGE_COUNTS[label])
+
+
+def test_an_announced_stage_never_hides_how_the_run_ended(tmp_path):
+    run_dir = make_run_dir(tmp_path, files=("raw_crawl.csv",))
+    failed = write_log(tmp_path, ["STAGE=scoring", "Traceback",
+                                  "EXIT_CODE=1"])
+    assert runner.stage_of(run_dir, failed) == "failed"
+    status = runner.poll(run_dir, failed)
+    assert status["stage_counts"] == [] and status["elapsed_seconds"] is None
+
+    with open(os.path.join(run_dir, "findings.json"), "w",
+              encoding="utf-8") as handle:
+        handle.write("{}")
+    done = write_log(tmp_path, ["STAGE=findings", "EXIT_CODE=0"],
+                     name="done.log")
+    assert runner.stage_of(run_dir, done) == "done"
+
+
+def test_elapsed_time_runs_from_the_started_line(tmp_path):
+    log = write_log(tmp_path, ["STAGE=cross_page"])
+    started = time.mktime(time.strptime("2026-01-01T00:00:00",
+                                        "%Y-%m-%dT%H:%M:%S"))
+    assert runner.started_of(log) == started
+    assert runner.elapsed_seconds(log, now=started + 125) == 125
+    # A stage line moves the file's own time; the start stays where it was.
+    os.utime(log, (started + 900, started + 900))
+    assert runner.elapsed_seconds(log, now=started + 125) == 125
+
+    bare = write_log(tmp_path, ["working"], name="bare.log", header=False)
+    assert runner.started_of(bare) is None
+    assert runner.elapsed_seconds(bare) is None
+
+
+def test_a_run_that_announces_stages_stays_bound_to_its_folder(tmp_path):
+    """Each STAGE line moves the log's modified time past the folder's.
+
+    The folder was found as the newest one written since the log's modified
+    time, so the first stage line would have cut the view off from its run.
+    """
+    log_dir = tmp_path / "output" / "logs"
+    log = write_run_log(log_dir, "audit-20260101-000000.log",
+                        ["Crawling https://example.com ..."])
+    run_dir = make_run_dir(tmp_path, files=("raw_crawl.csv",),
+                           rows={"raw_crawl.csv": 3})
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write("STAGE=sitemap_sweep\n")
+    later = os.path.getmtime(run_dir) + 60
+    os.utime(log, (later, later))
+
+    root = str(tmp_path / "output")
+    assert runner.bound_run_dir(str(log), root=root) == run_dir
+    attached = runner.attach(log_dir=str(log_dir), root=root)
+    assert attached and attached["run_dir"] == run_dir
+
+
+def test_run_dir_and_exit_code_still_parse_beside_stage_lines(tmp_path):
+    """The two load-bearing lines, written by a real child through the real
+    wrapper into a log opened the way start_audit opens one."""
+    log = str(tmp_path / "audit-20260101-000000.log")
+    with open(log, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(RUN_LOG_HEADER) + "\n")
+    child = ("import sys; [print(line, file=sys.stderr, flush=True) for line "
+             "in ('Crawling https://example.com ...', 'STAGE=sitemap_sweep', "
+             "'STAGE=findings', 'RUN_DIR=output/example.com/20260101-000000')"
+             "]; print('{}')")
+    with open(log, "a", encoding="utf-8") as handle:
+        finished = runner.subprocess.run(
+            runner.wrapped_command([sys.executable, "-c", child], log),
+            stdout=handle, stderr=runner.subprocess.STDOUT)
+
+    assert finished.returncode == 0
+    assert runner.is_run_log(log)
+    assert runner.run_dir_of(log) == "output/example.com/20260101-000000"
+    assert runner.exit_code_of(log) == 0
+    assert runner.stage_marker_of(log) == "findings"
+    with open(log, encoding="utf-8") as handle:
+        assert handle.read().splitlines()[-1] == "EXIT_CODE=0"
+    assert "'EXIT_CODE=' + str(code)" in runner.WRAPPER
+
+
+def test_the_audit_announces_each_stage_as_it_begins(tmp_path, capsys):
+    import requests_mock
+    from conftest import BASE, html_page, register_site
+    from seo_audit import cli, crawl
+
+    timed, sweep = crawl._stage, crawl._sweep
+    with requests_mock.Mocker() as mock:
+        register_site(mock, {BASE + "/": html_page(["/about"]),
+                             BASE + "/about": html_page([])})
+        code = cli.main(["--domain", "example.com", "--out", str(tmp_path),
+                         "--delay", "0", "--workers", "2", "--no-pagespeed",
+                         "--no-compare"])
+    err = capsys.readouterr().err.splitlines()
+
+    assert code == 0
+    assert cli.STAGE_PREFIX == runner.STAGE_PREFIX
+    stages = announced(err)
+    assert stages == ["sitemap_sweep", "graph_and_content", "cross_page",
+                      "site_level", "pagespeed_skipped", "scoring",
+                      "findings"]
+    assert all(name in runner.STAGE_LABELS for name in stages)
+    # RUN_DIR is untouched: printed once, after every stage, naming the folder.
+    run_dirs = [line for line in err
+                if line.startswith(runner.RUN_DIR_PREFIX)]
+    assert run_dirs == [f"RUN_DIR={tmp_path}"]
+    last_stage = max(index for index, line in enumerate(err)
+                     if line.startswith(runner.STAGE_PREFIX))
+    assert err.index(run_dirs[0]) > last_stage
+    # The crawl is handed back exactly as it was found.
+    assert crawl._stage is timed and crawl._sweep is sweep
+
+
+def test_a_measured_speed_stage_is_announced_as_measuring(tmp_path, capsys,
+                                                         monkeypatch):
+    import requests_mock
+    from conftest import BASE, html_page, register_site
+    from seo_audit import cli
+    from seo_audit.pagespeed import KEY_ENV_VAR
+
+    monkeypatch.setenv(KEY_ENV_VAR, "test-key")
+    with requests_mock.Mocker() as mock:
+        register_site(mock, {BASE + "/": html_page([])})
+        code = cli.main(["--domain", "example.com", "--out", str(tmp_path),
+                         "--delay", "0", "--workers", "2", "--no-compare",
+                         "--pagespeed-templates", "1"])
+    stages = announced(capsys.readouterr().err.splitlines())
+
+    assert code == 0
+    assert "pagespeed" in stages and "pagespeed_skipped" not in stages
+
+
+def test_the_live_panel_reads_the_rows_on_disk(app_runner, tmp_path,
+                                              monkeypatch):
+    """Only the launch is faked: the stage, the clock and the counts are the
+    real reading of a log and a run folder."""
+    run_dir = make_run_dir(tmp_path, host="live.example",
+                           name="20260102-000000")
+    log = write_run_log(tmp_path / "output" / "logs", "audit-live.log",
+                        ["Crawling https://live.example ...",
+                         "STAGE=graph_and_content"])
+    stream_rows(os.path.join(run_dir, "audit_pages.csv"), 12)
+    stream_rows(os.path.join(run_dir, "page_issues.csv"), 37)
+
+    monkeypatch.setattr(runner, "poll", REAL_POLL)
+    monkeypatch.setattr(runner, "exit_code_of", REAL_EXIT_CODE_OF)
+    monkeypatch.setattr(runner, "bound_run_dir",
+                        lambda path, root=runner.OUTPUT_ROOT: run_dir)
+    monkeypatch.setattr(runner, "start_audit",
+                        lambda domain, options=None, log_dir=None: {
+                            "ok": True, "pid": 1, "log": str(log),
+                            "command": [], "started": 0.0})
+
+    app = app_test().run()
+    app.text_input[0].set_value("https://live.example")
+    app.button[0].click().run()
+
+    assert not app.exception
+    assert "Stage: checking links and content" in [
+        header.value for header in app.subheader]
+    metrics = {metric.label: str(metric.value) for metric in app.metric}
+    assert metrics["Page issues found"] == "37"
+    assert metrics["Pages parsed"] == "12"
+    assert "Elapsed" in metrics
+    assert not any("%" in value for value in metrics.values())
+
+    stream_rows(os.path.join(run_dir, "page_issues.csv"), 5)
+    app.run()
+    metrics = {metric.label: str(metric.value) for metric in app.metric}
+    assert metrics["Page issues found"] == "42"
+
+
+def test_the_live_panel_shows_nothing_when_no_run_is_in_flight(app_runner):
+    app = app_test().run()
+    assert not app.exception
+    assert "No run in flight." in [item.value for item in app.markdown]
+    assert not app.metric
+
+
+def test_the_live_panel_goes_quiet_when_the_run_ends(app_runner):
+    app = app_test().run()
+    app.text_input[0].set_value("https://example.com")
+    app.button[0].click().run()
+    labels = [metric.label for metric in app.metric]
+    assert "Elapsed" in labels and "Addresses crawled" in labels
+
+    app_runner.exit_code = 0
+    app.run()
+    assert not app.exception
+    assert "Elapsed" not in [metric.label for metric in app.metric]
+
+
+def test_elapsed_time_is_written_in_whole_units():
+    import streamlit_app
+
+    assert streamlit_app.format_elapsed(None) == "n/a"
+    assert streamlit_app.format_elapsed(45.7) == "45s"
+    assert streamlit_app.format_elapsed(125) == "2m 05s"
+    assert streamlit_app.format_elapsed(3720) == "1h 02m"

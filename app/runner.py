@@ -8,10 +8,11 @@ folder, this module does not answer it.
 The audit runs as its own process with its output redirected to
 `output/logs/audit-<timestamp>.log`, so closing the browser, restarting
 Streamlit or losing the session does not stop it. Progress is read back from
-the files the run is writing, never from anything held in memory, and a run
-is finished when `findings.json` exists. The exit code is appended to the log
-when the process ends, which is how a run that died is told apart from one
-still working.
+the run itself, never from anything held in memory: the stage is the last
+STAGE= line the audit printed into its log, each count is rows in a file it
+is writing, and a run is finished when `findings.json` exists. The exit code
+is appended to the log when the process ends, which is how a run that died is
+told apart from one still working.
 
 A file counts as a run log only when it carries the COMMAND and STARTED
 header this module writes. Anything else that lands in that folder, someone's
@@ -21,16 +22,18 @@ started.
 
 from __future__ import annotations
 
+import csv
 import os
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 OUTPUT_ROOT = "output"
 LOG_DIR = os.path.join(OUTPUT_ROOT, "logs")
 RUN_DIR_PREFIX = "RUN_DIR="
 EXIT_PREFIX = "EXIT_CODE="
+STAGE_PREFIX = "STAGE="
 TAIL_LINES = 25
 
 # Every file a finished run folder carries, in the order a client would read
@@ -39,12 +42,55 @@ RUN_FILES = ("raw_crawl.csv", "crawl_summary.json", "sitemap_sweep.csv",
              "crawl_issues.csv", "audit_pages.csv", "page_issues.csv",
              "pagespeed.csv", "findings.json")
 
-# The stages a run passes through, each proved by a file the run wrote.
-# Scoring and findings share one window on purpose: the summary is written
-# between them, so no file separates them, and the console says both rather
-# than inventing a boundary.
-STAGES = ("starting", "crawling", "checking links", "measuring speed",
-          "scoring and findings", "done", "failed")
+# What the audit prints as each stage begins (seo_audit/cli.py), and the words
+# the console shows for it. Before the first line arrives the files decide:
+# no folder yet is "starting", an open raw crawl is "crawling". A log written
+# before these lines existed falls back to the files for every stage, where
+# scoring and findings share one window because no file separates them.
+STAGE_LABELS = {
+    "sitemap_sweep": "checking sitemap addresses",
+    "graph_and_content": "checking links and content",
+    "cross_page": "checking pages against each other",
+    "site_level": "checking transport and headers",
+    "pagespeed": "measuring speed",
+    "pagespeed_skipped": "skipping speed, not measured",
+    "scoring": "scoring pages",
+    "findings": "writing findings",
+}
+STAGES = (("starting", "crawling") + tuple(STAGE_LABELS.values())
+          + ("done", "failed"))
+
+# The counts beside a stage, each one rows the run has written to one file.
+# Nothing is estimated: the crawl finds pages as it goes and never knows a
+# total, so there is no percentage and no time remaining to show.
+COUNT_FILES = {
+    "Addresses crawled": "raw_crawl.csv",
+    "Pages parsed": "audit_pages.csv",
+    "Page issues found": "page_issues.csv",
+    "Crawl issues found": "crawl_issues.csv",
+    "Sitemap addresses checked": "sitemap_sweep.csv",
+    "Speed results": "pagespeed.csv",
+}
+# The count a stage moves comes first; the rest are what the run has so far.
+STAGE_COUNTS = {
+    "crawling": ("Addresses crawled", "Pages parsed", "Page issues found",
+                 "Crawl issues found"),
+    "checking sitemap addresses": ("Sitemap addresses checked",
+                                   "Addresses crawled", "Crawl issues found"),
+    "checking links and content": ("Page issues found", "Pages parsed"),
+    "checking pages against each other": ("Page issues found",
+                                          "Pages parsed"),
+    "checking transport and headers": ("Page issues found", "Pages parsed"),
+    "measuring speed": ("Speed results", "Page issues found"),
+    "skipping speed, not measured": ("Page issues found", "Pages parsed"),
+    "scoring pages": ("Pages parsed", "Page issues found"),
+    "writing findings": ("Pages parsed", "Page issues found",
+                         "Crawl issues found"),
+    # The labels a log without STAGE lines is read with.
+    "checking links": ("Sitemap addresses checked", "Addresses crawled",
+                       "Page issues found"),
+    "scoring and findings": ("Pages parsed", "Page issues found"),
+}
 
 
 # --- starting a run ---------------------------------------------------------
@@ -230,6 +276,53 @@ def exit_code_of(log_path: str) -> Optional[int]:
     return None
 
 
+def stage_marker_of(log_path: Optional[str]) -> Optional[str]:
+    """The last stage the audit announced in its log, if it announced one."""
+    for line in reversed(read_log(log_path).splitlines()):
+        if line.startswith(STAGE_PREFIX):
+            return line[len(STAGE_PREFIX):].strip() or None
+    return None
+
+
+def started_of(log_path: Optional[str]) -> Optional[float]:
+    """When the run began, from the STARTED line start_audit stamped."""
+    if not log_path or not os.path.exists(log_path):
+        return None
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as handle:
+            head = [next(handle, "") for _ in range(HEADER_LINES)]
+    except OSError:
+        return None
+    for line in head:
+        if line.startswith(STARTED_PREFIX):
+            try:
+                return time.mktime(time.strptime(
+                    line[len(STARTED_PREFIX):].strip(), "%Y-%m-%dT%H:%M:%S"))
+            except ValueError:
+                return None
+    return None
+
+
+def elapsed_seconds(log_path: Optional[str],
+                    now: Optional[float] = None) -> Optional[float]:
+    """Seconds since the STARTED line, or None for a log without one."""
+    started = started_of(log_path)
+    if started is None:
+        return None
+    return max(0.0, (time.time() if now is None else now) - started)
+
+
+def _began(log_path: str) -> float:
+    """When a run log was opened.
+
+    Not the file's modified time: the audit prints a STAGE line into the log
+    as each stage begins, so that time moves past the run folder's own and
+    the folder would stop looking like it belonged to this run.
+    """
+    started = started_of(log_path)
+    return started if started is not None else os.path.getmtime(log_path)
+
+
 def newest_run_dir(since: float = 0.0, root: str = OUTPUT_ROOT
                    ) -> Optional[str]:
     """The newest run folder created since a moment, for a run in flight.
@@ -256,11 +349,23 @@ def newest_run_dir(since: float = 0.0, root: str = OUTPUT_ROOT
 
 
 def row_count(path: str) -> int:
-    """Data rows in a streamed CSV, header not counted."""
+    """Data rows in a streamed CSV, header not counted.
+
+    Counted as CSV records, not lines: a page title can carry a line break
+    inside its quoted cell, and one audit_pages.csv read by lines said 563
+    rows where 509 were written.
+    """
     if not os.path.exists(path):
         return 0
-    with open(path, encoding="utf-8-sig", errors="replace") as handle:
-        return max(0, sum(1 for _line in handle) - 1)
+    try:
+        with open(path, encoding="utf-8-sig", errors="replace",
+                  newline="") as handle:
+            return max(0, sum(1 for _record in csv.reader(handle)) - 1)
+    except csv.Error:
+        # A cell past the csv module's size limit. Lines are the next best
+        # reading, and a count that stops the page is no count at all.
+        with open(path, encoding="utf-8-sig", errors="replace") as handle:
+            return max(0, sum(1 for _line in handle) - 1)
 
 
 def _exists(run_dir: str, name: str) -> bool:
@@ -276,6 +381,11 @@ def stage_of(run_dir: Optional[str], log_path: Optional[str] = None) -> str:
         # The process ended without findings.json, whatever it said on the
         # way out. That is a failed run, not a finished one.
         return "failed"
+    marker = stage_marker_of(log_path) if log_path else None
+    if marker:
+        # What the run said it is doing. The files below are only asked when
+        # it has not said anything yet.
+        return STAGE_LABELS.get(marker, marker.replace("_", " "))
     if not run_dir:
         return "starting"
     if _exists(run_dir, "crawl_summary.json"):
@@ -289,11 +399,21 @@ def stage_of(run_dir: Optional[str], log_path: Optional[str] = None) -> str:
     return "starting"
 
 
+def stage_counts(run_dir: Optional[str], stage: str
+                 ) -> List[Tuple[str, int]]:
+    """The counts for one stage, each read off the file holding those rows."""
+    if not run_dir:
+        return []
+    return [(label, row_count(os.path.join(run_dir, COUNT_FILES[label])))
+            for label in STAGE_COUNTS.get(stage, ())]
+
+
 def poll(run_dir: Optional[str], log_path: Optional[str] = None
          ) -> Dict[str, Any]:
     """Everything the console shows while a run is in flight."""
     log = read_log(log_path) if log_path else ""
     stage = stage_of(run_dir, log_path)
+    running = stage not in ("done", "failed")
     counters = {"pages": 0, "issues": 0, "sitemap urls swept": 0}
     if run_dir:
         counters = {
@@ -305,13 +425,19 @@ def poll(run_dir: Optional[str], log_path: Optional[str] = None
         }
     return {
         "stage": stage,
-        "running": stage not in ("done", "failed"),
+        "running": running,
         "done": stage == "done",
         "failed": stage == "failed",
         "run_dir": run_dir,
         "counters": counters,
         "exit_code": exit_code_of(log_path) if log_path else None,
         "tail": "\n".join(log.splitlines()[-TAIL_LINES:]),
+        # Only while the run goes: a finished run has no stage to count for
+        # and no clock still running.
+        "marker": stage_marker_of(log_path) if log_path else None,
+        "elapsed_seconds": (elapsed_seconds(log_path)
+                            if running and log_path else None),
+        "stage_counts": stage_counts(run_dir, stage) if running else [],
     }
 
 
@@ -325,7 +451,7 @@ def attach(log_dir: str = LOG_DIR, root: str = OUTPUT_ROOT
     """
     for log_path in running_runs(log_dir):
         run_dir = run_dir_of(log_path) or newest_run_dir(
-            since=os.path.getmtime(log_path), root=root)
+            since=_began(log_path), root=root)
         if run_dir and _exists(run_dir, "findings.json"):
             continue
         return {"log": log_path, "run_dir": run_dir}
@@ -344,7 +470,8 @@ def bound_run_dir(log_path: str, root: str = OUTPUT_ROOT) -> Optional[str]:
     named = run_dir_of(log_path)
     if named:
         return named
-    started = os.path.getmtime(log_path)
+    started = _began(log_path)
+    # Another log still being written after this run began is a later run.
     newer = [path for path in running_runs(os.path.dirname(log_path))
              if path != log_path and os.path.getmtime(path) > started]
     if newer:
